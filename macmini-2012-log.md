@@ -238,3 +238,49 @@ dig +dnssec dnssec-failed.org @192.168.1.19
 | Log Visibility    | Full query log on AdGuard |
 | Blocklists        | Region-specific for Japan |
 
+---
+
+# 🧾 System Log Entry — May 17, 2025
+
+**System:** Mac Mini 2012 (Pop!_OS)  
+**Role:** DNS Server (AdGuard via Docker), Cat Café Livestream Host  
+
+---
+
+## 🔧 Issue  
+System unexpectedly entered sleep mode at **18:13 JST**, causing DNS and livestream service outage.
+
+---
+
+## 📋 Diagnosis  
+- `systemd` logs confirmed system entered **S3 suspend** state.  
+- `sleep-inactive-battery-type` was set to `'suspend'` (likely misread power source).  
+- `NetworkManager` marked interfaces as "sleeping".  
+- System resumed ~41 minutes later at 18:54.
+
+---
+
+## ✅ Resolution  
+- Disabled GNOME power suspend settings:  
+  ```bash
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
+  gsettings set org.gnome.settings-daemon.plugins.power lid-close-ac-action 'nothing'
+  gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action 'nothing'
+  ```
+
+- Masked all systemd sleep targets to hard-disable sleep:
+  ```bash
+  sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+  ```
+
+- Verified with:
+  ```bash
+  systemctl status sleep.target suspend.target hibernate.target hybrid-sleep.target
+  ```
+
+---
+
+## 🧱 Outcome  
+System is now hardened against suspend or hibernate behavior.  
+Configured to run **headless 24/7** for uninterrupted DNS and livestreaming.
