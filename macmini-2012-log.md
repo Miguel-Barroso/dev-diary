@@ -240,47 +240,71 @@ dig +dnssec dnssec-failed.org @192.168.1.19
 
 ---
 
-# 🧾 System Log Entry — May 17, 2025
+# 🧾 System Hardening Log — May 17, 2025
 
-**System:** Mac Mini 2012 (Pop!_OS)  
-**Role:** DNS Server (AdGuard via Docker), Cat Café Livestream Host  
-
----
-
-## 🔧 Issue  
-System unexpectedly entered sleep mode at **18:13 JST**, causing DNS and livestream service outage.
+**Machine:** Mac Mini 2012  
+**OS:** Pop!\_OS 22.04  
+**Role:** Cat Café Livestream Host, AdGuard DNS Server  
 
 ---
 
-## 📋 Diagnosis  
-- `systemd` logs confirmed system entered **S3 suspend** state.  
-- `sleep-inactive-battery-type` was set to `'suspend'` (likely misread power source).  
-- `NetworkManager` marked interfaces as "sleeping".  
-- System resumed ~41 minutes later at 18:54.
+## 🔧 Issues Observed
+
+- System entered unintended sleep, causing DNS and stream outage.
+- OBS using x264 software encoding, overloading CPU.
+- `io.elementary.appcenter` (Pop!_Shop) consuming 100% CPU for no reason.
+- Remote Desktop sessions were laggy and unstable.
+- Load average spiking above 19 with poor responsiveness.
 
 ---
 
-## ✅ Resolution  
-- Disabled GNOME power suspend settings:  
-  ```bash
-  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
-  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
-  gsettings set org.gnome.settings-daemon.plugins.power lid-close-ac-action 'nothing'
-  gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action 'nothing'
-  ```
+## ✅ Actions Taken
 
-- Masked all systemd sleep targets to hard-disable sleep:
-  ```bash
-  sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
-  ```
-
-- Verified with:
-  ```bash
-  systemctl status sleep.target suspend.target hibernate.target hybrid-sleep.target
-  ```
+### 🛑 Disabled Sleep
+```bash
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing'
+gsettings set org.gnome.settings-daemon.plugins.power lid-close-ac-action 'nothing'
+gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action 'nothing'
+```
 
 ---
 
-## 🧱 Outcome  
-System is now hardened against suspend or hibernate behavior.  
-Configured to run **headless 24/7** for uninterrupted DNS and livestreaming.
+### 🎥 Optimized OBS for VAAPI Hardware Encoding
+- Confirmed H.264 VAAPI support via `vainfo`
+- Launched OBS with:
+```bash
+LIBVA_DRIVER_NAME=i965 obs
+```
+- Set encoder: `FFMPEG VAAPI`
+- Set bitrate: `2500 Kbps`
+- Disabled preview in OBS to reduce GPU load
+
+---
+
+### 🧼 Removed Unnecessary Software (Pop!_Shop)
+```bash
+sudo apt remove pop-shop
+sudo apt autoremove
+```
+Confirmed `io.elementary.appcenter` binary is gone.
+
+---
+
+### 📉 Outcome
+
+| Component | Status |
+|----------|--------|
+| Sleep | ✅ Disabled |
+| OBS | ✅ Hardware-accelerated (VAAPI) |
+| System load | ✅ Normalized (avg ~1.9) |
+| AppCenter | ✅ Removed |
+| DNS + Stream | ✅ Stable and responsive |
+| RDP / GUI Lag | ✅ Resolved |
+
+---
+
+**System is now clean, lean, and stable for 24/7 cat café streaming.**
+
+🐱📡🧠  
