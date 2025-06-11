@@ -1,6 +1,7 @@
 🛠️ WooCommerce + WPML Product Variations Troubleshooting
 
 TL;DR: Broken product variations on translated product pages? Here's how I punched it into working again. 😤🔥
+
 🧠 Background
 
 When translating WooCommerce products using WPML, I noticed:
@@ -12,6 +13,7 @@ When translating WooCommerce products using WPML, I noticed:
     Dropdowns were empty or broken
 
 Turns out WPML can get too clever with how it links translated products and their attributes.
+
 ✅ Solution
 
     Edit the product in either the original or translated language.
@@ -34,7 +36,9 @@ Turns out WPML can get too clever with how it links translated products and thei
         Re-link the product by selecting the original/translation again in the "Translation of:" dropdown.
 
 💡 This lets you override locked/greyed-out settings that were otherwise inaccessible.
+
 🎁 Bonus Tips
+
 🧩 Attribute sanity check:
 
     Go to WooCommerce → Attributes
@@ -53,6 +57,7 @@ So if:
 
 🛑 DO NOT rely on WPML Translation Manager for variations or attributes.
 It's… garbage for this use case. 🗑️💥
+
 📌 Final Note
 
 This issue burned quite a few hours of my life.
