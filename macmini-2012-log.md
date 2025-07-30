@@ -309,7 +309,7 @@ Confirmed `io.elementary.appcenter` binary is gone.
 
 🐱📡🧠  
 
-## 2025-05-25 – AdGuard + SmokePing Update
+## 2025-07-25 – AdGuard + SmokePing Update
 
 ### 🔧 AdGuard DNS Configuration
 - Updated upstream DNS resolver to use **Cloudflare over HTTPS**:  
@@ -333,6 +333,7 @@ Confirmed `io.elementary.appcenter` binary is gone.
 - Saved Targets file backup to home folder
 
 NB1: You can check the configuration either using ```systemctl status smokeping``` or ```smokeping --check```
+
 NB2: The Targets file need variable declarations ontop and an example is as follows:
 ```
 *** Targets ***
@@ -369,4 +370,123 @@ title = Raspberry Pi 3 Camera (2.4 GHz)
 host = 192.168.1.50
 ```
 
----
+## 2025-07-30 – AdGuard as DHCP Server Update
+
+Background:
+Needed to serve DHCP via AdGuard Home to map which clients generate which DNS requests—and use that insight to refine the block/allow lists.
+
+Steps Taken
+	1.	Enable DHCP in AdGuard Home
+Edited conf/AdGuardHome.yaml:
+```dhcp:
+  enabled: true
+  interface_name: enp1s0f0
+  ```
+2.	Assign Static IP to Mac mini
+Configured enp1s0f0 in Pop!_OS to:
+```
+192.168.1.19/24 (255.255.255.0)
+```
+3.	Point System DNS Locally
+In Pop!_OS network settings, set DNS to:
+```
+127.0.0.1   # AdGuard Home
+1.1.1.1     # fallback
+```
+4.	Run AdGuard in Docker with Host Networking
+In docker-compose.yml (or via docker run):
+```
+network_mode: host
+cap_add:
+  - NET_ADMIN
+  - NET_RAW
+```
+This allows the container to bind to UDP/67 for DHCP.
+
+5.	Unblock DHCP in the Firewall
+
+UFW rules (scoped to enp1s0f0):
+  ```
+sudo ufw allow in  on enp1s0f0 proto udp from 192.168.1.0/24 to any port 67
+sudo ufw allow in  on enp1s0f0 proto udp to any port 68
+sudo ufw allow out on enp1s0f0 proto udp from any to any port 67
+sudo ufw allow out on enp1s0f0 proto udp from any to any port 68
+sudo ufw reload
+  ```
+
+Raw iptable rules:
+
+  ```
+sudo iptables -I INPUT  -p udp --dport 67 -j ACCEPT
+sudo iptables -I OUTPUT -p udp --sport 67 -j ACCEPT
+  ```
+UFW “before” rules (to let broadcast DHCP packets bypass filters):
+  ```
+*filter
+# Allow DHCP DISCOVER / REQUEST
+-A ufw-before-input  -p udp --sport 68 --dport 67 -j ACCEPT
+# Allow DHCP OFFER / ACK
+-A ufw-before-output -p udp --sport 67 --dport 68 -j ACCEPT
+  ```
+
+6.	Install Docker Compose
+  
+  ```
+sudo apt update
+sudo apt install docker-compose-plugin
+  ```
+7.	Declare AdGuard in docker-compose.yml
+Created /opt/adguardhome/docker-compose.yml:
+```
+services:
+  adguardhome:
+    image: adguard/adguardhome:latest
+    container_name: adguardhome
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./conf:/opt/adguardhome/conf
+      - ./work:/opt/adguardhome/work
+    command:
+      - --no-check-update
+      - -c
+      - /opt/adguardhome/conf/AdGuardHome.yaml
+      - -w
+      - /opt/adguardhome/work
+```
+Brought it up with:
+```
+docker compose up -d
+```
+Result:
+Mac mini now reliably serves DHCP via AdGuard Home in Docker, with all firewall rules correctly in place and service managed declaratively through Docker Compose.
+
+## 2025-07-30 – CatCam1 Live Stream Update
+
+**Background**  
+Stream was struggling to keep up and YouTube sometimes disconnected due to too little data.
+
+### Changes Applied
+
+1. **Switched Encoder**  
+   - Moved from VAAPI to software x264 for greater reliability.
+
+2. **Optimized x264 Settings**  
+   - **Keyframe Interval:** 2 seconds (keyint=60)  
+   - **Resolution:** 1280 × 720 (no rescaling)  
+   - **Frame Rate:** 30 fps  
+   - **Video Bitrate:** CBR 2 500 kbps  
+   - **Preset & Profile:** veryfast preset, main profile  
+   - **Additional Flags:** `tune=zerolatency`  
+   - **Audio:** Disabled all audio devices
+3. **Reduce Local Load**  
+   - Disabled OBS preview window  
+   - Closed all unnecessary applications (browsers, background tasks)
+
+### Result
+
+- **Dropped frames** reduced from ~21 % to **< 1 %**  
+- Stream stability restored; no further YouTube disconnects observed  
