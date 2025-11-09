@@ -58,3 +58,60 @@ Pop!_OS on my X1 Extreme is now fully hardened and privacy-protected:
 Essentially:
 
 A mobile workstation that behaves like it’s still on my home LAN — but with full VPN-level privacy and a hardened firewall.
+
+## 🧰 Dev Diary — Fixing Slow sudo Response on Pop!_OS (X1E Gen1)
+
+**Date:** 2025-11-09
+
+**System:** ThinkPad X1 Extreme Gen 1 (Pop!_OS)  
+
+### 🐢 Problem: Noticed a consistent ~10-second delay before any sudo command started running.
+
+**Example:**
+```
+time sudo true
+# real 0m10.065s
+```
+The delay occurred before any visible output or network activity, suggesting it wasn’t apt or I/O related.
+
+### 🔍 Investigation
+- Tested `sudo` responsiveness directly → confirmed delay independent of command.
+- Suspected hostname or PAM resolution.
+- Checked /etc/hosts — found only:
+```
+127.0.0.1 localhost
+::1       localhost
+```
+- Ran hostname → x1e-pop-os
+- Realized hostname missing from /etc/hosts.
+
+### ⚙️ Fix
+Added hostname to the localhost entry:
+```
+127.0.0.1   localhost x1e-pop-os
+::1         localhost
+```
+
+### ⚡ Result
+
+s‌udo response became instant:
+
+```
+time sudo true
+# real 0m0.023s
+```
+
+## 🧠 Root Cause
+
+`sudo` and PAM modules try to resolve the system’s hostname for logging/auth purposes.
+Without a local entry, Linux falls back to DNS queries that time out (~10s).
+Adding the hostname to /etc/hosts provides an immediate local resolution.
+
+### 🪄 Lesson Learned
+
+Always ensure /etc/hosts contains:
+
+```
+127.0.0.1 localhost <hostname>
+```
+to avoid slow `sudo` responses, especially on Pop!_OS, Ubuntu, or systems using systemd-resolved.
