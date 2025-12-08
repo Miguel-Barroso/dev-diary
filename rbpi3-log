@@ -1,0 +1,162 @@
+## 2025-12-08 — RBPi3 Surveillance Setup, Part 2
+
+## Background
+
+As outlined in Development > Python > rbpi3-surveillance > dev-diary.md, I am using an old Raspberry Pi 3 as a dedicated surveillance camera streaming video using mjpg-streamer. This follows earlier work documented in Development > dev-diary > rbpi4-cctv.md, where I experimented with different approaches on the Pi 3 and 4.
+
+The Raspberry Pi 3 has a long-standing and well-known issue:
+its Broadcom WiFi chipset (brcmfmac) can silently hang, especially under sustained throughput or marginal signal strength. When it hangs once, it usually never reconnects on its own — even with power-saving disabled (```iw dev wlan0 set power_save off```). This makes it a poor candidate for unattended surveillance unless additional reliability measures are added.
+
+## WiFi Reliability Fix
+
+To work around this, I wrote a small recovery script that periodically checks the kernel log (dmesg) for specific Broadcom driver failures — in this case:
+
+```brcmf_proto_bcdc_msg failed```
+
+Whenever this signature appears, it indicates that the driver is stuck and the WiFi stack can no longer transmit or negotiate. The script then:
+	1.	Brings down the WiFi interface
+	2.	Stops the wpa_supplicant@wlan0.service instance
+	3.	Repeatedly attempts to unload the brcmfmac module (with retry loops, since the kernel doesn’t always release it immediately)
+	4.	Reloads the module
+	5.	Restarts wpa_supplicant
+	6.	Brings the interface back up
+
+This entire flow is driven by a systemd service and scheduled via a systemd timer, which checks for failures every few minutes. The timer is lightweight and survives reboots cleanly. A journal namespace is used for logging so failures and recoveries can be reviewed later in a structured way.
+
+This workaround effectively “revives” the Pi’s WiFi without requiring a full reboot, allowing the Pi 3 to function as a semi-reliable IP camera despite its hardware limitations.
+
+### Systemd files
+✅ File 1 — WiFi Reset Script
+
+Path
+```/usr/local/bin/wifi_reset.sh```
+
+Permissions
+```sudo chmod +x /usr/local/bin/wifi_reset.sh```
+
+Content:
+
+```
+#!/bin/bash
+set -euo pipefail
+
+LOGTAG="wifi-reset"
+IFACE="wlan0"
+
+# Log helper
+log() {
+    logger -t $LOGTAG "$1"
+}
+
+# Check for the Broadcom hang signature
+if ! dmesg | grep -qi "brcmf_proto_bcdc_msg failed"; then
+    exit 0
+fi
+
+log "WiFi hang detected on $IFACE — restarting driver..."
+
+# Bring interface down
+ip link set "$IFACE" down || log "Failed to bring $IFACE down"
+
+# Stop wpa_supplicant@wlan0 if running
+if systemctl is-active --quiet "wpa_supplicant@$IFACE.service"; then
+    log "Stopping wpa_supplicant@$IFACE"
+    systemctl stop "wpa_supplicant@$IFACE.service"
+fi
+
+# Try unloading brcmfmac repeatedly
+for i in {1..5}; do
+    if modprobe -r brcmfmac 2>/dev/null; then
+        log "Unloaded brcmfmac driver"
+        break
+    fi
+    sleep 1
+done
+
+# Reload driver
+modprobe brcmfmac && log "Reloaded brcmfmac driver"
+
+# Restart wpa_supplicant
+if systemctl start "wpa_supplicant@$IFACE.service"; then
+    log "Started wpa_supplicant@$IFACE"
+fi
+
+# Bring interface back up
+ip link set "$IFACE" up || log "Failed to bring $IFACE up"
+
+log "WiFi recovery process completed"
+exit 0
+```
+
+This logs everything to /var/log/syslog under the tag wifi-reset.
+
+✅ File 2 — Systemd Service Unit:
+
+Path
+```/etc/systemd/system/wifi-reset.service```
+
+Content
+
+```
+[Unit]
+Description=WiFi driver recovery for Raspberry Pi 3
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wifi_reset.sh
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+✅ File 3 — Systemd Timer Unit:
+
+Path
+```/etc/systemd/system/wifi-reset.timer```
+
+Content:
+```
+[Unit]
+Description=Check for Raspberry Pi WiFi driver hangs every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=wifi-reset.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+## Network Security Hardening
+
+Because this Pi is exposed to the internet through mjpg-streamer’s web interface, I added firewall rules using UFW to reduce the attack surface. The goal was to keep the device reachable only through:
+	•	Local LAN (192.168.1.0/24)
+	•	Any device on my Tailscale network (100.64.0.0/10)
+
+All other incoming traffic is denied.
+
+Final ruleset:
+
+```
+192.168.1.0/24    ALLOW IN
+100.64.0.0/10     ALLOW IN
+Default: deny incoming, allow outgoing
+```
+
+This ensures the Pi is no longer exposed publicly and can only be accessed from trusted networks or authenticated Tailscale nodes, which significantly reduces the risk of unauthorized access.
+
+## Summary
+
+Summary
+
+By combining:
+	•	a custom WiFi recovery script
+	•	systemd automation
+	•	firewall lockdown with UFW
+
+…this old Raspberry Pi 3 now functions as a stable and relatively secure camera node. While its hardware is limited and WiFi issues persist, the automated recovery mechanism and restricted access model make it viable for long-term surveillance use.
