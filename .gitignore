@@ -1,0 +1,6 @@
+# .gitignore
+*.pem
+*.key
+*.crt
+.env
+secrets.txt
