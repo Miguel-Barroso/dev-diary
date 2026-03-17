@@ -197,3 +197,15 @@ Since Vaultwarden unlocks all premium features, TOTP generation is available nat
 - **Certificate renewal:** Caddy renews the Let's Encrypt certificate automatically before expiry. No manual action needed.
 - **Tailscale dependency:** The vault is only reachable over Tailscale. Ensure Tailscale is running on all client devices before expecting access.
 - **Container Station edits:** The GUI does not allow editing the YAML after deployment. To make changes, delete the application and recreate it with the updated YAML. Vaultwarden data persists on disk and is unaffected by container recreation.
+
+## Backup
+
+Vaultwarden data is located at `/share/CE_CACHEDEV1_DATA/vaultwarden/data` and contains:
+
+- `db.sqlite3` — the entire vault database
+- `rsa_key.pem` / `rsa_key.pub.pem` — the server key pair
+- `config.json` — admin panel configuration (if modified)
+
+A QNAP shared folder was created pointing to `/share/CE_CACHEDEV1_DATA/vaultwarden` making it visible to QNAP backup tools. It has been added to the main backup job in Hybrid Backup Sync.
+
+The Caddy data at `/share/CE_CACHEDEV1_DATA/vaultwarden/caddy/data` contains the SSL certificate but does not need to be backed up — Caddy will re-obtain it automatically from Let's Encrypt if lost.
