@@ -180,3 +180,142 @@ The system is now a fully operational Flutter development workstation capable of
 from a single codebase.
 
 The environment is version-controlled, reproducible, and optimized for developer productivity.
+
+# 🛠️ Dev Diary --- Debugging 500 ms Latency (Discord / Network Routing)
+
+## 📅 Date
+
+2026-03-17
+
+## 🎯 Problem
+
+Experienced extremely high latency (\~500 ms) in Discord voice calls
+between Japan (me, Shiga) and Sweden (Malmö).
+
+Even basic network tests showed abnormal behavior: - `ping 1.1.1.1` →
+\~300 ms ❌ - Local ping (`192.168.1.1`) → \~3 ms ✅
+
+------------------------------------------------------------------------
+
+## 🔍 Initial Hypothesis
+
+-   Discord server selection issue (region mismatch)
+-   ISP routing problem (ZTV, Japan)
+-   VPN interference (Tailscale / WireGuard)
+
+------------------------------------------------------------------------
+
+## 🧪 Investigation
+
+### 1. Traceroute revealed immediate latency
+
+``` bash
+traceroute 1.1.1.1
+```
+
+Result: - \~300 ms from first hop (10.x.x.x)
+
+👉 Indicated local routing issue, not external network.
+
+------------------------------------------------------------------------
+
+### 2. Verified local network
+
+``` bash
+ping -c 6 192.168.1.1
+```
+
+Result: - \~3 ms ✅
+
+👉 LAN healthy
+
+------------------------------------------------------------------------
+
+### 3. Checked routing table
+
+``` bash
+netstat -rn
+```
+
+Key findings: - Active utun interfaces (utun0--utun6) - IPv6 default
+routes via utun - Suspicious IPv4 split (0/1 and 128.0/1)
+
+👉 Indicates a full-tunnel VPN still active.
+
+------------------------------------------------------------------------
+
+## 💥 Root Cause
+
+Combination of:
+
+1.  Stale VPN tunnel (utun6)
+2.  Broken IPv6 routing via utun interfaces (macOS prefers IPv6)
+
+👉 Result: traffic misrouted → \~300 ms latency
+
+------------------------------------------------------------------------
+
+## 🔧 Fix
+
+### Disable utun interfaces
+
+``` bash
+sudo ifconfig utun0 down
+sudo ifconfig utun1 down
+sudo ifconfig utun2 down
+sudo ifconfig utun3 down
+sudo ifconfig utun6 down
+```
+
+### Remove IPv6 default routes
+
+``` bash
+sudo route -n delete -inet6 default -interface utunX
+```
+
+------------------------------------------------------------------------
+
+## ✅ Result
+
+``` bash
+ping -c 6 1.1.1.1
+```
+
+Output: - \~15--17 ms 🎉
+
+------------------------------------------------------------------------
+
+## 📊 Before vs After
+
+  Test                 Before     After
+  -------------------- ---------- ---------------
+  Local (LAN)          \~3 ms     \~3 ms
+  Internet (1.1.1.1)   \~300 ms   \~16 ms
+  Discord call         \~500 ms   \~120--180 ms
+
+------------------------------------------------------------------------
+
+## 🧠 Key Learnings
+
+-   macOS prioritizes IPv6, even when broken
+-   VPNs can leave stale utun interfaces and routes
+-   Full-tunnel configs are dangerous for latency-sensitive apps
+-   Always inspect routes with `netstat -rn`
+
+------------------------------------------------------------------------
+
+## ⚡ Best Practices Going Forward
+
+-   Use split tunneling for VPN
+-   Avoid full-tunnel unless necessary
+-   Verify routes after VPN usage
+-   Use Singapore region for Japan ↔ Europe Discord calls
+
+------------------------------------------------------------------------
+
+## 🏁 Conclusion
+
+Issue was not: - Discord ❌ - ISP ❌
+
+It was: 👉 Local routing corruption caused by stale VPN interfaces +
+IPv6 preference
