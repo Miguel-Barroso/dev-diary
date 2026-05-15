@@ -209,3 +209,124 @@ Vaultwarden data is located at `/share/CE_CACHEDEV1_DATA/vaultwarden/data` and c
 A QNAP shared folder was created pointing to `/share/CE_CACHEDEV1_DATA/vaultwarden` making it visible to QNAP backup tools. It has been added to the main backup job in Hybrid Backup Sync.
 
 The Caddy data at `/share/CE_CACHEDEV1_DATA/vaultwarden/caddy/data` contains the SSL certificate but does not need to be backed up — Caddy will re-obtain it automatically from Let's Encrypt if lost.
+
+# Dev Diary — Caddy Failure, Cloudflare Token Cleanup, and Container Hardening
+
+## Date
+2026-05-15
+
+## Context
+A Vaultwarden setup behind a Caddy reverse proxy on a QNAP NAS started behaving unexpectedly: Caddy was repeatedly stopping and failing to restart properly. This broke HTTPS access to the service and required investigation into both container behavior and TLS configuration.
+
+---
+
+## Initial Symptom
+
+Caddy was in a restart loop or failing to stay up consistently. Logs indicated repeated startup attempts without stable operation.
+
+At first glance, this looked like a runtime or configuration issue inside Caddy itself.
+
+---
+
+## Investigation
+
+During troubleshooting, the following key issues were identified:
+
+### 1. Cloudflare API token exposed in plain text
+
+The Cloudflare API token used for DNS-01 challenge authentication was found directly inside the `docker-compose.yml` file.
+
+This presented two problems:
+- Security risk (secret stored in plaintext in versioned config)
+- Poor secret management practice
+
+---
+
+## Remediation — Secret Rotation
+
+Once the exposure was identified:
+
+- The existing Cloudflare API token was **revoked (rotated)**
+- A new token was generated
+- The new token was moved into a `.env` file instead of being stored in the compose file
+
+This ensured:
+- No secrets stored in version control or static YAML
+- Better separation of configuration and credentials
+
+---
+
+## Docker Compose Updates
+
+The `docker-compose.yml` was updated with several improvements:
+
+### 1. Removed inline secret usage
+- Cloudflare token removed from service definition
+- Replaced with `env_file: .env`
+
+### 2. Added proper port exposure for Caddy
+
+```yaml
+ports:
+  - "80:80"
+  - "443:443"
+```
+
+This ensured:
+
+* HTTP traffic properly handled for redirects / ACME validation
+* Standard TLS + HTTP accessibility
+
+3. Added restart policy
+```restart: unless-stopped```
+
+This improved resilience so that:
+
+* Caddy automatically recovers after reboots or crashes
+* Manual intervention is not required for service restoration
+
+Caddy Configuration Update
+
+The Caddyfile was updated to correctly reference the environment variable:
+
+```
+tls {
+    dns cloudflare {env.CF_API_TOKEN}
+}
+```
+
+This ensured:
+
+* Cloudflare DNS challenge uses injected runtime secret
+* No hardcoded credentials in configuration files
+
+Result After Fixes
+
+After applying the changes and recreating the stack:
+
+* Caddy started reliably
+* No more restart loops
+* Cloudflare DNS authentication succeeded
+* TLS certificates were issued automatically
+* Vaultwarden became reachable via HTTPS again
+
+⸻
+
+Key Learnings
+
+* Never store API tokens directly in docker-compose.yml
+* Secrets must be rotated immediately if exposed, even in local environments
+* Docker Compose environment changes require full container recreation
+* Caddy DNS-01 Cloudflare integration depends strictly on runtime env injection
+* Basic hardening (restart policies + proper port mapping) significantly improves stability
+
+⸻
+
+Final State
+
+✔ Secrets rotated and secured
+✔ Cloudflare token moved to .env
+✔ Caddy properly configured with env injection
+✔ Restart policy added for resilience
+✔ HTTP/HTTPS ports correctly exposed
+✔ Vaultwarden accessible via secure HTTPS

@@ -319,3 +319,100 @@ Issue was not: - Discord ❌ - ISP ❌
 
 It was: 👉 Local routing corruption caused by stale VPN interfaces +
 IPv6 preference
+
+# VSCodium Flutter Tab Autocomplete Fix
+
+**Date:** 2026-03-25
+**Project:** evol
+**Environment:** VSCodium 1.96.4, macOS, Flutter 3.41.4 (FVM), Dart 3.11.1
+
+---
+
+## Symptom
+
+Tab and Enter did not accept autocomplete suggestions in `.dart` files. The suggestion widget would appear and could be navigated with arrow keys, but pressing Tab or Enter did nothing. The Dart analysis server also did not appear in the Output panel dropdown.
+
+---
+
+## Root Cause
+
+Three compounding issues, all of which needed to be fixed:
+
+### 1. Wrong SDK path in `.vscode/settings.json`
+
+The project-level settings file had an incorrect `dart.flutterSdkPath`:
+
+```json
+// ❌ Wrong — this path doesn't exist locally
+"dart.flutterSdkPath": ".fvm/versions/stable"
+
+// ✅ Correct — points to the FVM symlink
+"dart.flutterSdkPath": ".fvm/flutter_sdk"
+```
+
+### 2. Bad file permissions on `.vscode/settings.json`
+
+The file was owned by root, so VSCodium could not read it:
+
+```bash
+# Was owned by root — VSCodium couldn't read it
+sudo cat .vscode/settings.json  # required sudo to read
+```
+
+### 3. `dart.enableCompletionCommitCharacters` was false
+
+This Dart extension setting controls whether Tab and Enter act as "commit characters" to accept a selected completion. It was disabled (the default), which meant the suggestion widget displayed correctly but Tab/Enter were silently ignored at the LSP level — regardless of keybindings.
+
+---
+
+## Fix
+
+### Step 1 — Correct the SDK path
+
+```bash
+cat > .vscode/settings.json << 'EOF'
+{
+  "dart.flutterSdkPath": ".fvm/flutter_sdk",
+  "dart.enableCompletionCommitCharacters": true
+}
+EOF
+```
+
+### Step 2 — Fix file permissions
+
+```bash
+sudo chown $USER:staff .vscode/settings.json
+chmod 644 .vscode/settings.json
+```
+
+### Step 3 — Remove conflicting user-level setting
+
+In `~/Library/Application Support/VSCodium/User/settings.json`, remove any `dart.flutterSdkPath` entry. This setting should only live in the project's `.vscode/settings.json`, since it uses a relative path that only resolves correctly from the project root.
+
+### Step 4 — Clean up keybindings
+
+With `dart.enableCompletionCommitCharacters: true` handling Tab/Enter at the extension level, no custom keybindings are needed. Set `keybindings.json` to:
+
+```json
+[]
+```
+
+### Step 5 — Restart
+
+Fully quit VSCodium (Cmd+Q), reopen into the project root, and confirm "Dart" appears in the Output panel dropdown.
+
+---
+
+## Verification
+
+- "Dart" entry appears in the Output panel dropdown
+- Flutter/Dart SDK version shown in the status bar bottom-right
+- Tab and Enter accept completions in `.dart` files
+
+---
+
+## Notes
+
+- **FVM symlink** at `.fvm/flutter_sdk` → `/Users/mb/fvm/versions/stable` was valid throughout; the SDK itself was never the problem.
+- The Dart analysis server was actually running correctly the whole time — it just wasn't logging to the Output panel because VSCodium wasn't capturing extension output. Adding `"dart.analyzerLogFile": "/tmp/dart_analyzer.log"` to user settings confirmed LSP was healthy.
+- The missing "Dart" entry in the Output panel was a red herring caused by the bad `.vscode/settings.json` permissions/path, not a server crash.
