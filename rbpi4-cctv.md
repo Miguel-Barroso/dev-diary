@@ -52,7 +52,7 @@ This guide documents how to migrate and run mjpg-streamer-experimental from a Ra
     ```bash
     ExecStart=/usr/local/bin/mjpg_streamer \
       -i "/usr/local/lib/mjpg-streamer/input_uvc.so -d /dev/video0 -r 640x480 -f 15" \
-      -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:REDACTED"
+      -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:<YOUR_PASSWORD>"
     ```
 
 7. Reload systemd and start the service:
@@ -68,17 +68,17 @@ This guide documents how to migrate and run mjpg-streamer-experimental from a Ra
    - **Curl test (with credentials):**
 
         ```bash
-        curl -u admin:REDACTED "http://192.168.1.142:8080/?action=stream"
+        curl -u admin:<YOUR_PASSWORD> "http://<pi-lan-ip>:8080/?action=stream"
         ```
 
    - **VLC test:**
 
         ```
-        http://admin:REDACTED@192.168.1.142:8080/?action=stream
+        http://admin:<YOUR_PASSWORD>@<pi-lan-ip>:8080/?action=stream
         ```
 
    - **Browser test:**  
-     Open `http://admin:REDACTED@192.168.1.142:8080/?action=stream` in Chrome or Firefox.
+     Open `http://admin:<YOUR_PASSWORD>@<pi-lan-ip>:8080/?action=stream` in Chrome or Firefox.
 
 ---
 
@@ -113,7 +113,7 @@ If you want to see detailed plugin output:
 sudo systemctl stop mjpg-streamer
 /usr/local/bin/mjpg_streamer \
   -i "/usr/local/lib/mjpg-streamer/input_uvc.so -d /dev/video0 -r 640x480 -f 15" \
-  -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:REDACTED"
+  -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:<YOUR_PASSWORD>"
 ```
 •	Run MJPG-Streamer manually in a terminal to see verbose output directly.
 •	Once done, press Ctrl+C to stop, then restart the service:
@@ -141,14 +141,13 @@ sudo apt install ffmpeg
 ### 2. Relay MJPG-Streamer feed to RTMP
 Run FFmpeg to read the MJPEG stream from your Raspberry Pi and push it to a local RTMP server (for example, OBS’s built-in obs-rtmp or Nginx RTMP):
 
-```
-ffmpeg -i "http://admin:REDACTED@192.168.1.142:8080/?action=stream" \
-       -f flv rtmp://localhost/live/stream
-       -i "http://admin:password@IP:8080/?action=stream" – the MJPEG source from your Pi.
+```bash
+ffmpeg -i "http://admin:<YOUR_PASSWORD>@<pi-lan-ip>:8080/?action=stream" \
        -f flv rtmp://localhost/live/stream
 ```
 
-– outputs as an RTMP stream that OBS can use as a Media Source.
+- `-i "http://admin:<YOUR_PASSWORD>@<pi-lan-ip>:8080/?action=stream"` — the MJPEG source from your Pi.
+- `-f flv rtmp://localhost/live/stream` — outputs as an RTMP stream that OBS can use as a Media Source.
 
 ### 3. Open OBS Studio
 Launch OBS Studio on your computer.

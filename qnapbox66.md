@@ -99,7 +99,9 @@ cat /share/CE_CACHEDEV1_DATA/vaultwarden/caddy/Caddyfile
 
 1. Open **Container Station** in the QNAP web UI
 2. Click **Create → Create Application**
-3. Paste the following docker-compose YAML, replacing `your_cf_token_here` with your actual Cloudflare API token:
+3. Paste the following docker-compose YAML, replacing `your_cf_token_here` with your actual Cloudflare API token.
+
+> ⚠️ **This is the original deployment as it happened — kept as a faithful record.** The token sitting inline in the compose YAML is exactly the anti-pattern I had to fix two months later. See the **"Caddy Failure, Cloudflare Token Cleanup, and Container Hardening"** entry further down for how I moved the token into an `.env` file. If you're following this guide today, jump to that section first and use `env_file` from the start.
 
 ```yaml
 version: '3'

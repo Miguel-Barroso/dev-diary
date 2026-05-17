@@ -231,19 +231,19 @@ Add:
 ```
 # --- QNAP NAS (Tailscale) Automounts ---
 # Multimedia
-//100.92.18.72/Multimedia /home/mb/QNAP/Multimedia cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
+//100.x.x.x/Multimedia /home/mb/QNAP/Multimedia cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
 
 # Miguel
-//100.92.18.72/homes/Miguel /home/mb/QNAP/Miguel cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
+//100.x.x.x/homes/Miguel /home/mb/QNAP/Miguel cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
 
 # IT
-//100.92.18.72/IT /home/mb/QNAP/IT cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
+//100.x.x.x/IT /home/mb/QNAP/IT cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
 
 # Businesses
-//100.92.18.72/Businesses /home/mb/QNAP/Businesses cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
+//100.x.x.x/Businesses /home/mb/QNAP/Businesses cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
 
 # Ebihara Solutions
-//100.92.18.72/Ebihara\040Solutions /home/mb/QNAP/Ebihara\040Solutions cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
+//100.x.x.x/Ebihara\040Solutions /home/mb/QNAP/Ebihara\040Solutions cifs _netdev,noatime,x-systemd.automount,x-systemd.idle-timeout=300,x-systemd.device-timeout=10,credentials=/etc/samba/cred-qnap,uid=1000,gid=1000,iocharset=utf8,vers=3.0,nofail 0 0
 ```
 
 ---

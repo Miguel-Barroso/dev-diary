@@ -134,7 +134,7 @@ WantedBy=timers.target
 
 ## Network Security Hardening
 
-Because this Pi is exposed to the internet through mjpg-streamer’s web interface, I added firewall rules using UFW to reduce the attack surface. The goal was to keep the device reachable only through:
+Because this Pi runs mjpg-streamer’s HTTP interface, I locked it down with UFW so it is only reachable from:
 	•	Local LAN (192.168.1.0/24)
 	•	Any device on my Tailscale network (100.64.0.0/10)
 

@@ -15,7 +15,7 @@ There are many ways to achieve this however in this guide the MJPG-Streamer-Expe
 
 ## Procedure
 ### Raspberry Pi Setup
-Setup the Raspberry Pi so that it has the latest OS and updates. Make sure you can connect to it via SSH from another device. VNC is optional but helpful (Tiger VNC is an excellent client). Connect the USB-camera and check `dmseg` that there are no communication problems. Otherwise, check that the powersupply is of correct rating, or switch camera.
+Setup the Raspberry Pi so that it has the latest OS and updates. Make sure you can connect to it via SSH from another device. VNC is optional but helpful (Tiger VNC is an excellent client). Connect the USB-camera and check `dmesg` that there are no communication problems. Otherwise, check that the powersupply is of correct rating, or switch camera.
 ### Installing mjpg-streamer
 First, make a directory called mjpg-streamer:
 
@@ -68,7 +68,7 @@ Fill it out like this:
     Group=pi-admin
     ExecStart=/usr/local/bin/mjpg_streamer \
       -i "/usr/local/lib/mjpg-streamer/input_uvc.so -d /dev/video0 -r 1280x720 -f 30" \
-      -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:my-test-password"
+      -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:<YOUR_PASSWORD>"
     StandardOutput=journal
     StandardError=journal
     
@@ -114,28 +114,27 @@ For auto-start on reboot:
     sudo systemctl enable mjpg-streamer
 
 Access it via browser, VLC etc:
-http://admin:REDACTED@192.168.1.142:8080/?action=stream
+http://admin:<YOUR_PASSWORD>@<pi-lan-ip>:8080/?action=stream
 
 The stream can be fed into different software, depending on the purpose; either live-streams or surveillance, etc.
 
-## Live-streaming via OBS Studio
-On a more powerful machine, install OBS Studio.
+## Live-streaming via OBS Studio (Linux)
 
-Add a new Media source, uncheck "Local file" and paste the URL:
-http://admin:REDACTED@192.168.1.142:8080/?action=stream
-Check "Use hardware acceleration where available".
+The working setup is to play the MJPEG stream in a dedicated VLC window and then capture that window in OBS using **XComposite Window Capture**.
 
+I originally tried pulling the stream directly into OBS as a Media Source, but it would silently stall and OBS provides no clean recovery hook when the upstream MJPEG feed hiccups. Capturing pixels off a VLC window sidesteps the problem entirely:
 
-Configure OBS Studio to stream on your favorite platform.
+- VLC has aggressive built-in retry and buffering for HTTP-MJPEG
+- A small `while true` watchdog around `cvlc` restarts it if the stream drops or VLC exits
+- OBS just captures whatever the window is displaying, so it's immune to upstream issues
 
-Note, if you do not see the stream in OBS but it works in VLC, here is a workaround you can try:
+The flow:
 
-1. Some installations of OBS Studio allows you to download and install a VLC source. Use it instead of the Media source.
-2. Run VLC standalone and capture the window in OBS.
-In order to get a clean picture without any controls you can run VLC via CLI. Instruction for Linux follows:
+1. `autovlc.sh` runs `cvlc` in a window and restarts it on failure
+2. `autovlc.service` (systemd user-session service) starts the script when the desktop loads
+3. In OBS, add an **XComposite Window Capture** source pointing at the VLC window
 
 ## Create VLC Watchdog Script
-In order to start VLC so it can be captured by OBS and to restart the stream in case there are any problems, create a watchdog script:
 
     nano autovlc.sh
 
@@ -145,7 +144,7 @@ Edit the file to look like this:
     while true; do
       cvlc --no-video-title-show --quiet --network-caching=1000 \
            --width=1280 --height=720 --no-autoscale \
-           "http://admin:REDACTED@192.168.1.142:8080/?action=stream"
+           "http://admin:<YOUR_PASSWORD>@<pi-lan-ip>:8080/?action=stream"
       echo "[`date`] VLC crashed or stream ended. Restarting in 5s..."
       sleep 5    done
 
@@ -169,7 +168,8 @@ Make the file executable and run the file:
 
 VLC will auto-retry  indefinitely in case the Raspberry Pi encounters any problems.
 
-Go ahead and capture this window via OBS Studio.
+In OBS, add a new **XComposite Window Capture** source (Linux only) and pick the VLC window from the dropdown. The capture is direct from the X11 compositor, so there's no decoding overhead beyond what VLC is already doing.
+
 ## autovlc Service
 For best resilience and most utility, make autovlc.sh a service:
 

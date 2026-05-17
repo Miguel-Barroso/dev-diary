@@ -13,7 +13,7 @@
 ```bash
 #!/bin/bash
 fswatch -o "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" | while read; do
-  rsync -avz --delete -e ssh "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" miguelbarroso:/home/u2143-sa8fa25pp7dz/www/miguelbarroso.com/public_html/
+  rsync -avz --delete -e ssh "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" miguelbarroso:/home/<your-siteground-account>/www/miguelbarroso.com/public_html/
 done
 ```
 
@@ -28,7 +28,7 @@ done
 - Updated rsync command to include `--chmod` option to enforce correct permissions on sync.
 
 ```bash
-rsync -avz --delete --no-perms -e ssh "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" miguelbarroso:/home/u2143-sa8fa25pp7dz/www/miguelbarroso.com/public_html/
+rsync -avz --delete --no-perms -e ssh "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" miguelbarroso:/home/<your-siteground-account>/www/miguelbarroso.com/public_html/
 ```
 
 ## Explanation
@@ -42,7 +42,7 @@ This ensures the webserver can read and enter the directories and read the files
 ```bash
 #!/bin/bash
 fswatch -o "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" | while read; do
-  rsync -avz --delete --no-perms -e ssh "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" miguelbarroso:/home/u2143-sa8fa25pp7dz/www/miguelbarroso.com/public_html/
+  rsync -avz --delete --no-perms -e ssh "/Users/mb/QNAP/Businesses/Miguel Barroso/public_html/" miguelbarroso:/home/<your-siteground-account>/www/miguelbarroso.com/public_html/
 done
 ```
 
