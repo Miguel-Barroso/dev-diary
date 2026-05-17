@@ -1,3 +1,149 @@
+# Early macOS setup (2024-12 → 2025-01)
+
+First weeks after migrating to the M4. A handful of recurring landmines and the workarounds that stuck.
+
+## Chromium and Gatekeeper
+
+After installing Chromium via Homebrew, macOS flagged the app as "damaged" and refused to open it. The usual "Open Anyway" path in System Settings → Privacy and Security was not available either.
+
+Strip the extended attributes Gatekeeper uses to quarantine the binary:
+
+```bash
+xattr -cr /Applications/Chromium.app
+```
+
+This has to be repeated after every Chromium update, so a shell alias makes it painless:
+
+```bash
+alias fixchromium='xattr -cr /Applications/Chromium.app'
+```
+
+Later migrated to ungoogled-chromium when upstream Chromium was deprecated on Homebrew Cask. Did not need the same fix - worked out of the box!
+
+## External monitor at 60 Hz
+
+Anything above 60 Hz on the external display (Samsung CJ79 family) produced visible artifacts on the M4 — practically unusable across the whole UI. Forcing 60 Hz (or dropping resolution) resolved it.
+
+Installed MonitorControl to drive external-display brightness and volume from macOS's native UI:
+
+```bash
+brew install --cask monitorcontrol
+```
+
+Imperfect (depends on the monitor's DDC/CI implementation) but a real productivity win.
+
+## .zshenv vs .zshrc
+
+When setting up Ruby for CocoaPods, I tried to export the Homebrew Ruby path in `~/.zshrc`. That clobbered the default `PATH` and made the shell effectively unusable — most system commands stopped resolving.
+
+Lesson: on modern macOS, persistent path exports belong in `~/.zshenv`, not `~/.zshrc`. `.zshenv` is sourced for every zsh invocation (including non-interactive ones), and additive `export` statements compose cleanly with the defaults Apple ships.
+
+Current `~/.zshenv`:
+
+```bash
+# Ruby gems installed via Homebrew
+export PATH=$HOME/.gem/bin:$PATH
+
+# Flutter
+export PATH=$HOME/development/flutter/bin:$PATH
+
+# Browser used by Flutter (verify via `flutter doctor`)
+export CHROME_EXECUTABLE="/Applications/Chromium.app/Contents/MacOS/Chromium"
+
+# Allow shell-style comments in interactive shells
+setopt INTERACTIVE_COMMENTS
+```
+
+## CocoaPods: skip `gem`, use Homebrew
+
+Related lesson from the same week. Following the official `sudo gem install cocoapods` route on macOS led straight into Ruby dependency hell — manually installing pinned versions of `securerandom`, `drb`, `activesupport`, and `zeitwerk` before giving up.
+
+What worked:
+
+```bash
+brew uninstall --force cocoapods    # clear any half-installed remnants
+brew install cocoapods
+```
+
+Homebrew bundles the Ruby runtime and gem dependencies into a single package, so no version drift and no manual gem juggling.
+
+---
+
+# Home network rebuild (2025-01-07 → 2025-01-19)
+
+Both the MBP and the QNAP NAS have ethernet headroom that the WiFi-only home network was wasting. The goal was a dedicated high-speed MBP-to-NAS path that didn't touch the rest of the LAN.
+
+## First attempt — direct ethernet subnet
+
+Manual IPs on the dedicated link:
+
+- MBP USB-C-hub ethernet: `192.168.10.2`
+- QNAP NAS, Adapter 1: `192.168.10.1`
+- Netmask `255.255.255.0`, gateway blank on both ends
+
+Direct LAN transfers (rsync, SMB browsing) ran at full ethernet speed without ever crossing the router.
+
+## The collision saga
+
+Tried to also route internet traffic through this same interface, hoping to combine speed with normal browsing. That broke things badly:
+
+- High ping and packet loss
+- The Asus RT-AC86U logged multicast errors and eventually kernel-panicked
+- The Docomo 5G router also lost stability
+- Network unusable end-to-end
+
+Mixing a dedicated point-to-point link with a router-managed broadcast domain caused arp/multicast collisions that confused both routers. Lesson: a direct NAS subnet has to stay isolated.
+
+## 2025-01 topology
+
+Rebuilt the home network around an Orbi mesh:
+
+- Docomo 5G router (HR02) moved back to the top shelf in the tatami room
+- Astromeda PC connected directly to the Docomo router's 2.5 Gbps port
+- 1 Gbps port on Docomo → WAN port on a Netgear Orbi RBR20 in **Access Point mode** (avoids double NAT)
+- Orbi RBR20 LAN port → Nexus Link power-line adapter
+- Second Nexus Link adapter behind the computer desk → Orbi RBS20 satellite (ethernet backhaul)
+- Orbi satellite → QNAP NAS, Adapter 2
+- QNAP NAS, Adapter 1 → USB-C hub on the MBP (preserves the 192.168.10.x direct link)
+- Adapters 1 and 2 split in the QNAP virtual switch — internet traffic only exits via Adapter 2
+
+The power-line backhaul caused intermittent dropouts that the Orbi mesh interpreted as link failures. Removed the power-line and let the satellite use 5 GHz wireless backhaul instead. Stable since.
+
+## Plex over Tailscale
+
+Same week, added the MBP, Astromeda, QNAP, and Nothing Phone (2) to a Tailnet so Plex and Plexamp work from outside the house without opening ports or paying for Plex Pass remote streaming.
+
+In Plex's network settings, registered the QNAP's Tailscale IP as a custom server access URL:
+
+```
+http://100.x.x.x:32400
+```
+
+Clients now resolve the server via Tailscale whether the device is on the home LAN, on cellular, or on hotel WiFi abroad.
+
+## What's changed since (2026 update)
+
+The 2025-01 topology lasted about a year before iterative upgrades brought it to its current form:
+
+- **Orbi RBR20 + RBS20 → RBR50 + RBS50.** Upgraded both router and satellite for noticeably better backhaul throughput and a more capable processor. Same Access Point mode, same mesh layout.
+- **Asus RT-AC86U retired entirely.** Once everything stabilised on Orbi, the Asus was no longer doing useful work and came out of the rack.
+- **Docomo 5G router returned.** 5G connection was not reliable enough out here. Fortunately, could switch to fiber for cheap from ZTV and they even paid the installation fees. All devices are routed through Orbi still.
+- **Both Raspberry Pis moved to ethernet.** Their WiFi links broke down under sustained streaming load — the Pi 3's Broadcom hang is documented in `rbpi3-log.md`, and the Pi 4 had similar (less frequent) dropouts. Wired connections eliminated the issue entirely.
+
+Current device map:
+
+| Device           | Connection                                                       |
+| ---------------- | ---------------------------------------------------------------- |
+| QNAP TS-453 Pro  | Direct ethernet to Orbi RBR50                                    |
+| Mac Mini 2012    | Direct ethernet to Orbi RBR50                                    |
+| Raspberry Pi 3   | Ethernet → home-plug → home-plug → Orbi RBR50                    |
+| Raspberry Pi 4   | Ethernet to Orbi RBS50 satellite                                 |
+| Everything else  | WiFi via Orbi mesh                                               |
+
+Hardware footnote: the QNAP TS-453 Pro itself replaced a TS-451a that broke down — predates this diary.
+
+---
+
 # Dev Environment Setup — Flutter Workstation (2026-03-09)
 
 Today I configured my macOS machine as a full Flutter development environment for cross-platform mobile apps.
@@ -416,3 +562,26 @@ Fully quit VSCodium (Cmd+Q), reopen into the project root, and confirm "Dart" ap
 - **FVM symlink** at `.fvm/flutter_sdk` → `/Users/mb/fvm/versions/stable` was valid throughout; the SDK itself was never the problem.
 - The Dart analysis server was actually running correctly the whole time — it just wasn't logging to the Output panel because VSCodium wasn't capturing extension output. Adding `"dart.analyzerLogFile": "/tmp/dart_analyzer.log"` to user settings confirmed LSP was healthy.
 - The missing "Dart" entry in the Output panel was a red herring caused by the bad `.vscode/settings.json` permissions/path, not a server crash.
+
+---
+
+# Small fixes and aliases
+
+## Enabling SSH from the CLI (2025-02-21)
+
+The GUI route is System Settings → General → Sharing → Remote Login, but the one-line CLI equivalent is faster and scriptable:
+
+```bash
+sudo systemsetup -setremotelogin on
+```
+
+## fixaudio alias (2026-04-07)
+
+Audio devices on macOS occasionally get into a state where the wrong input or output is stuck selected and the UI can't switch. Killing `coreaudiod` forces a clean rebuild of the device list:
+
+```bash
+echo "alias fixaudio='sudo killall coreaudiod'" >> ~/.zshrc
+source ~/.zshrc
+```
+
+`fixaudio` now reliably recovers stuck audio without a reboot.
