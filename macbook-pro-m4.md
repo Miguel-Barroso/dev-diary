@@ -585,3 +585,200 @@ source ~/.zshrc
 ```
 
 `fixaudio` now reliably recovers stuck audio without a reboot.
+
+# 2026-05-24 Dev Diary Entry
+
+## Network Latency Investigation (Orbi Mesh + MBP M4)
+
+Today I investigated severe latency and jitter issues affecting my 2024 MacBook Pro M4 and QNAP NAS access.
+
+### Network Topology
+
+MBP M4
+→ Thunderbolt cable
+→ Samsung CJ79 monitor
+→ Anker USB-C Ethernet adapter (AX88179A)
+→ Netgear Orbi RBS50 satellite
+→ dedicated 5 GHz wireless backhaul
+→ Orbi RBR50 router
+
+Astromeda PC was connected to the same RBS50 satellite and simultaneously downloading games from Steam and Epic.
+
+### Observed Symptoms
+
+- Extremely high latency to internet and local QNAP NAS.
+- Speedtest on MBP showed:
+  - Idle latency around 306 ms
+  - Large jitter spikes
+- Even a Mac mini directly connected to the main router showed elevated jitter, though less severe.
+
+### Key Discovery
+
+The issue was primarily caused by network congestion / bufferbloat on the Orbi mesh backhaul.
+
+Important observations:
+
+- MBP over Ethernet adapter:
+  - ~100 ms latency to router
+- MBP over Wi-Fi:
+  - ~300 ms latency to router
+
+This indicated:
+- the AX88179A Ethernet adapter was not the primary problem
+- the Orbi wireless mesh/backhaul was saturating under load
+
+### Mitigation
+
+Limiting both Steam and Epic downloads on Astromeda to 50 Mbps dramatically improved network responsiveness and reduced latency.
+
+This strongly confirmed:
+- mesh backhaul saturation
+- queue/buffer congestion
+- classic consumer-router bufferbloat behavior
+
+---
+
+# Automated QNAP Backup Setup (SSH + rsync)
+
+To avoid unreliable SMB/Finder behavior over the mesh network, I switched to rsync over SSH for automated backups from the MBP to the QNAP NAS.
+
+## Why SSH + rsync
+
+Advantages over SMB:
+- More resilient over unstable Wi-Fi
+- Better resume behavior
+- No Finder dependency
+- Lower protocol overhead
+- Easier automation
+- Incremental syncing
+
+SSH host already existed in ```~/.ssh/config```:
+
+```ssh qnapbox66```
+
+## QNAP Path Decision
+
+Both of these paths worked:
+
+```/share/Businesses/AICLOSE/Backups/Flutter/apps```
+
+and
+
+```/share/CACHEDEV1_DATA/Businesses/AICLOSE/Backups/Flutter/apps```
+
+I chose the logical share path:
+
+```/share/Businesses/AICLOSE/Backups/Flutter/apps```
+
+because CACHEDEV paths are more implementation-specific and may change after storage migrations or pool changes.
+
+---
+
+# launchd + rsync Automation
+
+Created:
+
+```~/.backup_aiclose_qnap.sh``` 
+
+Final working script:
+
+```
+#!/bin/bash
+
+LOCKFILE="/tmp/backup_aiclose_qnap.lock"
+
+if [ -f "$LOCKFILE" ]; then
+    exit 0
+fi
+
+trap 'rm -f "$LOCKFILE"' EXIT
+touch "$LOCKFILE"
+
+/opt/homebrew/bin/rsync \
+-avh \
+--delete \
+--partial \
+--info=progress2 \
+--exclude=build \
+--exclude=.dart_tool \
+--exclude=.git \
+/Users/mb/Development/Flutter/apps/AICLOSE/ \
+qnapbox66:/share/Businesses/AICLOSE/Backups/Flutter/apps/AICLOSE/ 
+```
+
+## Important Discovery
+
+macOS ships an ancient rsync at:
+
+bash /usr/bin/rsync 
+
+which does NOT support:
+
+bash --info=progress2 
+
+My terminal was using the Homebrew-installed modern rsync instead.
+
+This caused confusion because:
+- interactive shell PATH
+- launchd PATH
+
+are different environments.
+
+The fix was explicitly using:
+
+bash /opt/homebrew/bin/rsync 
+
+inside the script.
+
+---
+
+# launchd Agent
+
+Created:
+
+bash ~/Library/LaunchAgents/com.mb.backup_aiclose_qnap.plist 
+
+Configured to:
+- run hourly
+- run at login
+- log stdout/stderr to /tmp
+
+Useful commands:
+
+bash launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mb.backup_aiclose_qnap.plist 
+
+Manual trigger:
+
+bash launchctl kickstart -k gui/$(id -u)/com.mb.backup_aiclose_qnap 
+
+Check status:
+
+bash launchctl list | grep backup_aiclose_qnap 
+
+Exit status meanings:
+- 0 = success
+- nonzero = last run failed
+
+---
+
+# Notes About Active Development
+
+Running rsync during active Flutter development is generally safe.
+
+Behavior:
+- rsync copies files as they exist at read time
+- changed files get updated on next sync
+- no file locking occurs
+- project continues functioning normally
+
+Excluded high-churn folders:
+- build
+- .dart_tool
+- .git
+
+This reduces:
+- transfer size
+- sync noise
+- inconsistent transient states
+
+The lockfile mechanism prevents overlapping backup runs.
