@@ -490,3 +490,55 @@ Stream was struggling to keep up and YouTube sometimes disconnected due to too l
 
 - **Dropped frames** reduced from ~21 % to **< 1 %**  
 - Stream stability restored; no further YouTube disconnects observed  
+
+---
+
+## 2026-06-20 — CatCam: Pi 4 H.264-over-WiFi → RTMP, retiring the VLC-window capture
+
+### Background
+The cat-café feed (Pi 4 + Logitech C525) was served as **MJPEG** over HTTP by `mjpg-streamer` on the Pi, played in a headless VLC window here, and pulled into OBS via **XComposite Window Capture** (see `rbpi4-catcam.md`). It worked, but it was a pile of workarounds:
+
+- OBS can't ingest the raw MJPEG Media Source without silently stalling — hence the screen-capture hack.
+- `autovlc.sh` had drifted to `--run-time=30 … vlc://quit`, so the captured VLC window relaunched every ~35 s — a periodic black-frame hiccup baked into the broadcast.
+- Two dead background loops were still running: `catcam_rtmp.service` was pulling `rtsp://192.168.1.41:554/11` (the Pi serves no RTSP → `Connection refused` in a tight restart loop), and a stray VLC was aimed at `rtsp://192.168.68.104` (a subnet this box can't even route to).
+- MJPEG at 720p30 is ~15–40 Mbps, which is why the Pi was stuck on Ethernet.
+
+### New architecture
+```
+Pi 4 (C525) → ffmpeg h264_v4l2m2m (720p30, ~3–4 Mbps) → RTMP push over 5 GHz WiFi
+     → rtmp://192.168.1.19/live/catcam      (this box's nginx-RTMP)
+          → OBS Media Source rtmp://localhost/live/catcam → x264 2500k → YouTube
+```
+The Pi hardware-encodes H.264 itself (the C525 has no onboard H.264 — only YUYV/MJPG), which drops the link to ~3 Mbps so it rides 5 GHz WiFi with no bufferbloat. nginx-RTMP decouples OBS from the WiFi: OBS reads a rock-solid `localhost` source, so brief WiFi hiccups never reach it. No screen capture, no VLC, no X dependency.
+
+### Changes on this box
+- **UFW** — nginx-RTMP was only ever used via localhost, so 1935 was LAN-blocked (the Pi's push timed out). Opened it to the LAN, scoped like the other rules:
+  ```bash
+  sudo ufw allow in on enp1s0f0 proto tcp from 192.168.1.0/24 to any port 1935
+  ```
+- **OBS** (scene *Bob's Family Fanclub*) — showed the existing **CatCam RTMP Stream** source (`rtmp://localhost/live/catcam`), hid **Window Capture (Xcomposite)**. The *Date and Time* overlay stays on top.
+- **Retired the cruft**:
+  ```bash
+  sudo systemctl disable --now catcam_rtmp.service   # dead RTSP watchdog
+  sudo systemctl disable --now autovlc.service        # cvlc on the retired MJPEG feed
+  sudo pkill -x vlc                                    # stray 192.168.68.104 window
+  ```
+
+### Gotcha — OBS source stuck black
+The `CatCam RTMP Stream` Media Source has `reconnect_delay_sec` unset and had been failing to open since long before the new publisher existed. When the live stream finally appeared it stayed **black** (socket connected, no playback). This OBS build has no *Restart* item in the source right-click menu; **toggling the source's eye icon off→on** forced a clean re-open and the cats came back. **TODO:** set a Reconnect Delay in the source Properties so it self-heals after a Pi reboot.
+
+### Result
+- OBS ingests a clean H.264 720p30 source — no screen capture, lower CPU.
+- Pi 4 streams over 5 GHz WiFi → free to relocate.
+- All stale/failing loops gone; only the Pi → RTMP → OBS path remains.
+
+### 2026-06-20 (later) — resilience hardening + reboot test
+
+Audited the whole chain for stability before calling it done.
+
+- **`worker_processes auto` was the real flakiness.** nginx-rtmp keeps published streams **per worker**; with `auto` (10 workers here) the publisher lives on one worker and any subscriber that connects to a *different* worker sees **no stream**. That's what made the OBS CatCam source "stick black" and need reconnect roulette. Fixed with **`worker_processes 1;`** (this box's nginx only does RTMP + SmokePing) + `systemctl restart nginx`. Publisher and OBS now always share the one worker. *(`gop_cache on` is **not** supported by Ubuntu's arut `libnginx-mod-rtmp` — only the http-flv fork has it; that attempt was reverted. Backup: `nginx.conf.bak-2026-06-20`.)*
+- **OBS CatCam source** (set via GUI): network buffering 4 MB, Reconnect Delay 10 s, "Restart playback when source becomes active" on, "Show nothing when playback ends" on. Hardware decode left **off** — 720p30 H.264 software decode is ~5 % CPU and dodges the flaky i965 VAAPI path; the heat is in the x264 *output* encode, not decode.
+- **Reboot test — passed.** Rebooted the Pi 4: WiFi auto-rejoined 5 GHz ch36, powersave off, pinned route re-applied, `catcam-rtmp` auto-started and pushed, nginx received it, and **OBS reconnected unattended** — cats back in ~90 s with no manual step.
+- **Thermals re-checked.** `auto-cpufreq` (+ `thermald`) is actively gating turbo — caught it dropping cores 3.1 → 2.3 GHz when the package hit ~88 °C, pulling it back from a brief 99 °C turbo peak. Total CPU load only ~18 %, so heat is dissipation-bound, not compute-bound, and turbo gating is the right lever. Sits at the ~87 °C "high" line but ~18 °C under the 105 °C critical; stable. De-dust/repaste would add summer headroom but isn't urgent.
+
+**Open resilience gap — macmini reboot:** nginx and AdGuard auto-start, but **OBS does not** (no `~/.config/autostart` entry, launched manually as `obs`, no auto-start-streaming). A macmini reboot leaves the YouTube stream down until OBS is started by hand. Fix: a `~/.config/autostart` `.desktop` running `flatpak run com.obsproject.Studio --startstreaming` (GNOME auto-login is already enabled). **Not yet applied** — pending decision.

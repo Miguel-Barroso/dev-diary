@@ -18,7 +18,7 @@ Self-taught developer notes from a decade of running things on my own hardware �
 
 ### Raspberry Pi
 - [`rbpi3-log.md`](rbpi3-log.md) — Pi 3 surveillance camera with a custom systemd-driven recovery script that revives the Broadcom WiFi chip when it hangs
-- [`rbpi4-catcam.md`](rbpi4-catcam.md) — Pi 4 with a USB webcam streaming MJPEG, captured into OBS via XComposite Window Capture for a public cat livestream
+- [`rbpi4-catcam.md`](rbpi4-catcam.md) — Pi 4 with a USB webcam for a public cat livestream: hardware H.264 (`h264_v4l2m2m`) pushed as RTMP over 5 GHz WiFi into OBS, replacing the old MJPEG + XComposite screen-capture hack
 - [`rbpi4-cctv.md`](rbpi4-cctv.md) — migrating mjpg-streamer from Pi 3 to Pi 4, plus an FFmpeg-to-RTMP relay path
 
 ### Web and games
