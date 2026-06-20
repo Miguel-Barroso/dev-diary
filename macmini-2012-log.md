@@ -541,4 +541,14 @@ Audited the whole chain for stability before calling it done.
 - **Reboot test — passed.** Rebooted the Pi 4: WiFi auto-rejoined 5 GHz ch36, powersave off, pinned route re-applied, `catcam-rtmp` auto-started and pushed, nginx received it, and **OBS reconnected unattended** — cats back in ~90 s with no manual step.
 - **Thermals re-checked.** `auto-cpufreq` (+ `thermald`) is actively gating turbo — caught it dropping cores 3.1 → 2.3 GHz when the package hit ~88 °C, pulling it back from a brief 99 °C turbo peak. Total CPU load only ~18 %, so heat is dissipation-bound, not compute-bound, and turbo gating is the right lever. Sits at the ~87 °C "high" line but ~18 °C under the 105 °C critical; stable. De-dust/repaste would add summer headroom but isn't urgent.
 
-**Open resilience gap — macmini reboot:** nginx and AdGuard auto-start, but **OBS does not** (no `~/.config/autostart` entry, launched manually as `obs`, no auto-start-streaming). A macmini reboot leaves the YouTube stream down until OBS is started by hand. Fix: a `~/.config/autostart` `.desktop` running `flatpak run com.obsproject.Studio --startstreaming` (GNOME auto-login is already enabled). **Not yet applied** — pending decision.
+**Resilience gap — macmini reboot — half-closed:** nginx and AdGuard auto-start, but OBS didn't. **Applied:** `~/.config/autostart/catcam-obs.desktop` runs `flatpak run com.obsproject.Studio --startstreaming` (verified real flag in OBS 32.1.2) with a 20 s delay, so on boot (GNOME auto-login already on) OBS relaunches and resumes the YouTube stream unattended. Caveat: YouTube assigns a **new watch/embed URL per session**, so the nekocafetime.com embed still needs updating after a restart until that's solved separately (persistent-broadcast or API approach).
+
+### 2026-06-20 — VAAPI hardware decode: ruled out (Flatpak ships only iHD)
+
+Tested whether the OBS Media Source could hardware-decode the incoming H.264 via VAAPI — and incidentally found why the old VAAPI *encode* was unreliable too.
+
+- The CPU (`i7-3615QM`, **Ivy Bridge / Gen7**) needs the legacy **i965** VAAPI driver. Proven working on the host: `LIBVA_DRIVER_NAME=i965 ffmpeg -hwaccel vaapi` decoded the live stream and `intel_gpu_top` showed the `VCS/0` (video-decode) engine active (~5–7 %).
+- But the OBS **Flatpak's** `org.freedesktop.Platform.VAAPI.Intel` extension (24.08/25.08) ships **only `iHD`** (intel-media-driver, Gen8+). There is **no `i965_drv_video.so` inside the sandbox**, and `iHD` fails to init on this GPU (`vaInitialize failed, error 1`).
+- So VAAPI (decode *or* encode) can't work in the Flatpak OBS here — the chip is capable, but the Flatpak dropped Gen7 support. Almost certainly why VAAPI encode was flaky before and x264 was the right call.
+
+Decision: stay on **software decode + x264 software encode**; `auto-cpufreq` handles thermals. Hardware accel would need a *native* (non-Flatpak) OBS using the host i965 — not worth it for a ~5 % decode saving. Installed `intel-gpu-tools` for the test (kept).
