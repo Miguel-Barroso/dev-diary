@@ -36,23 +36,24 @@ Imperfect (depends on the monitor's DDC/CI implementation) but a real productivi
 
 When setting up Ruby for CocoaPods, I tried to export the Homebrew Ruby path in `~/.zshrc`. That clobbered the default `PATH` and made the shell effectively unusable — most system commands stopped resolving.
 
-Lesson: on modern macOS, persistent path exports belong in `~/.zshenv`, not `~/.zshrc`. `.zshenv` is sourced for every zsh invocation (including non-interactive ones), and additive `export` statements compose cleanly with the defaults Apple ships.
+The original lesson was that persistent path exports belong in `~/.zshenv`, but years of adding development tools with `export PATH=…:$PATH` in both files led to ordering problems and duplicate entries. The approach was rethought in 2026-07 when the shell environment was cleaned up for AI development work (see "GNU/Linux compatibility layer for AI development", below).
+
+### Current state (2026-07-14)
+
+Shell responsibilities are now intentionally separated:
+
+* `.zshenv` — environment variables required by **every** zsh process (interactive and non-interactive). Minimal, no PATH manipulation, no aliases, no plugins.
+* `.zshrc` — interactive shell configuration: PATH ordering, Oh My Zsh, plugins, completions, aliases, AI tooling environment variables.
+
+This separation makes troubleshooting easier and creates a cleaner environment for Claude Code, DeepSeek, Opus, Headroom, Serena, Flutter, and future Linux development environments.
 
 Current `~/.zshenv`:
 
 ```bash
-# Ruby gems installed via Homebrew
-export PATH=$HOME/.gem/bin:$PATH
-
-# Flutter
-export PATH=$HOME/development/flutter/bin:$PATH
-
-# Browser used by Flutter (verify via `flutter doctor`)
 export CHROME_EXECUTABLE="/Applications/Chromium.app/Contents/MacOS/Chromium"
-
-# Allow shell-style comments in interactive shells
-setopt INTERACTIVE_COMMENTS
 ```
+
+`.zshenv` now contains only the single environment variable required by every zsh process. PATH modifications, Cargo's `~/.cargo/env` sourcing, the Ruby gems path, the Flutter SDK path, and `setopt INTERACTIVE_COMMENTS` were all intentionally removed. `INTERACTIVE_COMMENTS` only affects interactive shells and now lives in `.zshrc`. Cargo executables are exposed via the explicit `~/.cargo/bin` entry in `.zshrc`'s `path` array — no startup sourcing required.
 
 ## CocoaPods: skip `gem`, use Homebrew
 
@@ -198,6 +199,19 @@ The global Flutter command now points to:
 ~/fvm/default/bin/flutter
 
 This prevents conflicts between projects and makes builds reproducible.
+
+### Legacy SDK migration (2026-07-14)
+
+The machine has fully migrated to FVM. The old standalone Flutter SDK path (`~/development/flutter/bin`) was removed from all shell configuration, and the legacy SDK directory was deleted — reclaiming approximately **9.2 GB** of disk space.
+
+Verification:
+
+- `which flutter` returns nothing — no global Flutter command is exposed on `PATH`.
+- `fvm flutter --version` and `fvm flutter doctor` succeed from `apps/mobile` and other projects.
+- The project's `.fvm/flutter_sdk` symlink → `/Users/mb/fvm/versions/stable` is valid.
+- No remaining symlinks, `local.properties` files, or shell configuration reference `~/development/flutter`.
+
+This is an intentional workflow decision: no global `flutter` command is exposed. Flutter and Dart should always be invoked through `fvm` (e.g. `fvm flutter ...`, `fvm dart ...`) so the project's pinned SDK is always used. This avoids ambiguity and makes the active SDK explicit for both developers and AI coding agents.
 
 ---
 
@@ -585,6 +599,98 @@ source ~/.zshrc
 ```
 
 `fixaudio` now reliably recovers stuck audio without a reboot.
+
+# GNU/Linux compatibility layer for AI development (2026-07-14)
+
+This Mac is now configured to present a Linux-like shell environment for AI coding agents (Claude Code, DeepSeek, Opus, etc.) while remaining a native macOS workstation.
+
+## Why
+
+AI coding agents frequently assume GNU/Linux utilities. macOS lacks `timeout` entirely and ships BSD variants of `sed`, `grep`, `find`, and other core tools — flags differ, regex engines differ, and scripts that work on Linux silently break here. The compatibility layer reduces unnecessary agent failures and makes development more portable.
+
+## Installed GNU packages
+
+Via Homebrew:
+
+- `coreutils` — provides `gtimeout`, `gls`, `gsort`, and the full GNU coreutils suite
+- `findutils` — provides `gfind`, `gxargs`, `glocate`
+- `gnu-sed` — provides `gsed`
+- `grep` — provides `ggrep`
+
+## Compatibility shims
+
+`~/bin` contains symlinks that map familiar Linux command names to their GNU counterparts:
+
+| Symlink   | Target                    |
+| --------- | ------------------------- |
+| `timeout` | `/opt/homebrew/bin/gtimeout` |
+| `sed`     | `/opt/homebrew/bin/gsed`     |
+| `grep`    | `/opt/homebrew/bin/ggrep`    |
+| `find`    | `/opt/homebrew/bin/gfind`    |
+
+`~/bin` is intentionally first in `PATH` so these override the macOS versions. The host operating system is unchanged — only the shell command lookup order is affected.
+
+## PATH cleanup
+
+`.zshrc` was refactored to use zsh's native `path` array instead of repeatedly modifying `$PATH` with `export PATH=…:$PATH`. Duplicate entries are removed by `typeset -U path`.
+
+Current priority order:
+
+1. `~/bin` — GNU compatibility shims
+2. `~/.local/bin` — Claude Code, Headroom, tokensave, etc.
+3. `/opt/homebrew/bin` — Homebrew packages
+4. `/opt/homebrew/opt/openjdk/bin` — Java
+5. `~/fvm/default/bin` — Flutter (FVM)
+6. `~/.pub-cache/bin` — pub-cache
+7. `~/.cargo/bin` — Rust/Cargo
+8. `/Users/mb/Library/Android/sdk/…` — Android SDK
+9. `~/.gem/bin` — Ruby gems (Homebrew-managed)
+10. System paths (appended via `$path`)
+
+This produces a deterministic command lookup order and is easier to maintain than scattered `export PATH` statements. The old approach of repeatedly adding to `PATH` from both `.zshenv` and `.zshrc` is superseded — `.zshenv` is now reserved for environment variables that every zsh process needs (see ".zshenv vs .zshrc" above).
+
+Cargo's `~/.cargo/env` sourcing was also intentionally removed from `.zshenv` in favour of the explicit `~/.cargo/bin` PATH entry. This keeps all interactive PATH configuration visible in one place and eliminates an unnecessary startup action.
+
+`ANDROID_SDK_ROOT` is exported alongside `ANDROID_HOME` in `.zshrc` — newer Android tooling prefers `ANDROID_SDK_ROOT` while Flutter still supports `ANDROID_HOME`, so providing both ensures maximum compatibility.
+
+## AI development rationale
+
+Development takes place across:
+
+- macOS (this machine)
+- Linux (Docker, dev containers, CI)
+- future local AI inference machines (likely Linux)
+
+The goal is to allow AI agents to assume a mostly Linux-like shell environment without forcing macOS-specific instructions into project documentation. When an agent writes `timeout 30 ./some-test.sh` or uses GNU-specific `sed -E` syntax, it works here without translation.
+
+## Verification
+
+```bash
+$ timeout --version
+timeout (GNU coreutils) 9.11
+```
+
+`type -a` confirms the shims are resolved first:
+
+```bash
+$ type -a timeout sed grep find
+timeout is /Users/mb/bin/timeout
+timeout is /opt/homebrew/bin/timeout
+sed is /Users/mb/bin/sed
+sed is /usr/bin/sed
+grep is /Users/mb/bin/grep
+grep is /usr/bin/grep
+find is /Users/mb/bin/find
+find is /usr/bin/find
+```
+
+PATH ordering verified with:
+
+```bash
+$ echo $PATH | tr ':' '\n'
+```
+
+`~/bin` appears before all system paths.
 
 # 2026-05-24 Dev Diary Entry
 
