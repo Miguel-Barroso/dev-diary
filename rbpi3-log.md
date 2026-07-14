@@ -1,3 +1,51 @@
+# RBPi3 Surveillance — Consolidated Dev Diary
+
+> Single source of truth for the rbpi3 + Logitech C920 surveillance camera (→ QVR Pro NVR).
+> Consolidated 2026-06-21 from `dev-diary/rbpi3-log.md` and `Python/rbpi3-surveillance/dev-diary.md`. Newest entries first.
+
+---
+
+## 2026-06-21 — Full circle: H.264/MediaMTX → mjpg-streamer (MJPEG over HTTP)
+
+### Symptom
+QVR Pro showed a "sea of pixels" / macroblock storms on any movement — moving people/animals became impossible to identify, defeating the camera's purpose.
+
+### Root cause
+The `c920-publisher` ffmpeg config had drifted from the documented 2.5 Mbps to **4.5/6 Mbps** (`-b:v 4500k -maxrate 6000k -bufsize 9000k`). On a hot day that pushed the Pi3 to **82 °C and thermal-throttled the ARM clock** → libx264 couldn't keep up → frames delivered in bursts → QVR rendered the storms. Not a bandwidth/transport problem (link is wired, RTSP/TCP). Reverting bitrate to 2.5 Mbps cleared the throttle, **but H.264 still stormed on motion** — inter-frame compression at any Pi3-sustainable bitrate (≤2.5M; higher throttles) coarsely quantises motion residuals. The storms are intrinsic to H.264 here.
+
+### Options explored (and why rejected)
+- **MJPEG-in → H.264 re-encode** (A/B tested): *more* CPU (222% vs 172% of a core) — MJPEG decode is heavier than H.264 decode (bigger payload) — and still H.264 out ⇒ still storms. Wrong axis.
+- **GStreamer HW pipeline** (HW decode+encode): the encoder `/dev/video11` *does* expose the QVR-critical controls (`h264_profile=1` Constrained Baseline, `repeat_sequence_header`, `h264_i_frame_period`) that ffmpeg's `h264_v4l2m2m` wrapper can't set — would need GStreamer `v4l2h264enc extra-controls`. Not pursued: still H.264 = still storms; big rewrite + re-opens QVR validation.
+- **MJPEG passthrough over RTSP** (`-c:v copy` + AAC → MediaMTX): low CPU (25%, 68 °C) but the stream is **broken** — RTP/JPEG (RFC 2435) can't carry the C920's native JPEG (MediaMTX logged thousands of "received wrong fragment"); QVR blank.
+- **MJPEG re-encode over RTSP** (`-c:v mjpeg`): packetises cleanly (MediaMTX serves M-JPEG + AAC) but costs ~2 cores (194%) and **QVR still rejects MJPEG-over-RTSP** (`unspecified size` — no SDP dimensions). QVR blank.
+
+### Decisions / hard constraints learned
+- **QVR ingests MJPEG only over HTTP** (mjpg-streamer), never RTSP.
+- ∴ **MJPEG + audio is impossible with QVR** (HTTP-MJPEG carries no audio; audio only lived on the H.264/RTSP path). Chose **storm-free video over audio**.
+- Went **full circle** to the original 2025-07 architecture: C920 hardware-JPEG **passthrough → mjpg-streamer `output_http` :8080 → QVR over HTTP**.
+
+### Final state (verified)
+- `mjpg-streamer.service` (new): `input_uvc.so -d /dev/video0 -r 864x480 -f 15` → `output_http.so -p 8080`. HW-JPEG passthrough, intra-only ⇒ **no pixel storms**. Focus-pinning (`focus_absolute=0` = infinity) carried over via `ExecStartPost`.
+- **CPU ~1.4% (mjpg-streamer); ~65 °C; full 1200 MHz; load <1** (was 82 °C throttling).
+- QVR source URL: `http://192.168.1.51:8080/?action=stream`.
+- `pi-motion-detect.service`: repointed to the HTTP stream (`start_ffmpeg` made scheme-aware — `-f mpjpeg` for http, `-rtsp_transport tcp` for rtsp). **QVR motion events still wired** (`QVR_PRO_EVENT_URL` unchanged). Its leftover `Wants=/After=c920-publisher` (which *resurrected* the dead H.264 stack on restart) was fixed to depend on `mjpg-streamer`.
+- **Removed the H.264 stack as bloat**: `c920-publisher.service` + its README, **MediaMTX** (59 MB binary + `/etc/mediamtx` + unit), the dead `snapshot-stream.service`, and all `*.bak`/scratch leftovers. Full H.264 rebuild recipe is preserved in the **2026-06-19** entry below.
+
+### Known TODO / notes
+- mjpg-streamer HTTP has **no auth** now (relies on UFW LAN+Tailscale). Original used `-c user:pass`; add if exposing wider.
+- MJPEG storage on QVR is ~10–16× H.264 — lean on **motion-event recording** (what `pi-motion-detect` feeds).
+- The motion-detect reader decodes the full 720p stream to make 320×180@2fps (~0.5 core); trimmable by polling `?action=snapshot` instead — fps can't be lowered (see addendum).
+
+### Addendum (2026-06-21, later) — fps hardware-locked; powerline bufferbloat
+
+- **C920 fps is stuck at ~15 fps for 720p MJPG.** Requesting 10 fps (mjpg-streamer `-f 10` / v4l2 `--set-parm=10`) is *accepted by the driver* (`--get-parm` reports `10.000`) but the **camera delivers ~15 fps regardless** — so **fps is not a usable bitrate lever**; resolution is the only one. Config set to `-f 15` to match reality.
+- **QVR switched to motion-event recording only** (continuous retired now the on-Pi detector triggers events) → saves QNAP **disk**. Does *not* cut network load: QVR pulls the stream continuously, so ~30 Mbps flows 24/7 regardless of disk mode.
+- **Powerline is the bottleneck (measured).** Path: Pi (100 M eth) → HomePlug → mains → HomePlug → eth → TS-453 Pro (QVR records *here*; stream never reaches the RBR50 / WiFi / internet, barring remote viewing). Ping Pi→QNAP: **idle 1.3/2.9/6.1 ms; under the 30 Mbps stream 115/258/443 ms, 90 ms jitter, 0% loss** — the stream **saturates the powerline ⇒ ~255 ms bufferbloat (~90×)**. No loss (QVR records fine) but it monopolises that segment with zero headroom (a powerline dip would stutter the stream).
+- **Resolution is a weak lever — the C920 fills a ~fixed USB budget by varying fps** (measured): 720p→15 fps→30 Mbps (saturates, **258 ms** ping); 960×540→24 fps→29.4 Mbps (at the knee, 18 ms); **864×480→25 fps→24.7 Mbps→~3 ms** (idle-level, full headroom). Powerline knee ≈ 28–30 Mbps; bufferbloat is sharply nonlinear right there.
+- **Chosen: 864×480** (`-r 864x480 -f 15`; camera actually delivers ~25 fps — fps is uncontrollable). Highest res that sits well under the powerline knee. ID trade-off: less resolution, more (unneeded) fps. To go lower: 640×360 ≈ 10–12 Mbps. To keep 720p: fix the powerline (AV2 adapters / better outlet — avoid power strips & distant circuits / real ethernet / MoCA).
+- **The powerline is shared** — it also carries the **D-Link DCS-932L** cam and the **RBS20 Orbi satellite's WiFi backhaul** (serves the *kura*). So keeping this cam light protects kura WiFi + the other cam, not just the Pi. The measured 3 ms already includes the D-Link (always on); the only variable is kura WiFi when occupied (infrequent). This is *why* we hold ~25 Mbps instead of maxing the line — and why bumping to 720p was rejected even though it wouldn't touch the RBR50/main-LAN side. If kura WiFi ever lags while in use, drop this cam to 640×360 (~10–12 Mbps) for more headroom.
+
+---
 ## 2026-06-19 — SOLVED: QVR Pro stream corruption (the 2-year mystery)
 
 ### The symptom
@@ -367,3 +415,238 @@ By combining:
 	•	firewall lockdown with UFW
 
 …this old Raspberry Pi 3 now functions as a stable and relatively secure camera node. While its hardware is limited and WiFi issues persist, the automated recovery mechanism and restricted access model make it viable for long-term surveillance use.
+
+---
+
+# Earlier history — originally Python/rbpi3-surveillance/dev-diary.md
+
+# 2025-07-04 RBPi3 Surveillance Setup
+
+## Background  
+I had an old Raspberry Pi 3 B and a Logitech C920 USB webcam lying around, and wanted a cheap headless surveillance solution. Unfortunately, the Pi 3’s single USB-OTG bus (which it shares between the four USB ports and Ethernet/Wi-Fi) chokes when you try to push a high-bitrate H.264 or MJPEG RTSP stream in real time — even at modest resolutions like 320 × 240@10 fps the kernel logs would show `dwc2_hc_halt() channel can’t be halted` and the camera would disconnect entirely (see ```sudo dmseg -w```).
+
+Watching the same device locally under Raspbian (via VLC’s “Capture Device”) worked fine in full-HD, so I realized that continuous streaming was the problem. Instead, I needed to:
+
+1. **Snapshot** frames at a controlled rate (≤ 25 fps)  
+2. **Serve** them as a simple MJPEG HTTP stream with minimal buffering  
+
+## Troubleshooting Attempts
+
+- **v4l2rtspserver** (MJPEG / H.264) → green artifacts, dropped frames, USB bus resets  
+- **ffmpeg / cvlc** pipelines → frequent resets, unsupported/YUYV codec errors, panics  
+- **Alternative OS (Ubuntu 24.04)** → same USB bus faults under load  
+- **Unplug peripherals** (headless) → no improvement  
+
+## Final Solution: Flask + OpenCV MJPEG Snapshots
+Approach: Instead of a continuous video stream, capture single JPEG frames at up to 25 fps and serve them as an MJPEG HTTP stream.
+
+Built a tiny **Flask + OpenCV** snapshot server:
+
+- **Auto-detect** first working `/dev/video*`  
+- **Cap OpenCV buffer** to 1 frame → minimal latency  
+- **JPEG encode** at configurable quality (default 30)  
+- **Limit FPS** (default 25) via `time.sleep()`  
+- **Stream over HTTP** as `multipart/x-mixed-replace` → ingestible by VLC, QVR Pro, web browsers, etc.  
+- **Systemd service** for auto-start, restart on failure, headless operation  
+- **Remote access** via Tailscale + SSH
+
+Script: /usr/local/bin/snapshot_stream.py supports these CLI arguments:
+```
+--host: bind address (default 0.0.0.0)
+
+--port: HTTP port (default 8080)
+
+--fps: target frames per second (capped to avoid bus overload)
+
+--quality: JPEG quality (e.g. 30–50)
+
+snapshot_stream.py --host 0.0.0.0 --port 8080 --fps 25 --quality 30
+```
+
+### Repo Layout
+```
+rbpi3-surveillance/
+├── snapshot_stream.py        # main Flask/OpenCV MJPEG streamer
+├── requirements.txt          # Flask, opencv-python
+├── snapshot-stream.service   # systemd unit (auto-restart, 1 sec delay)
+├── README.md                 # install & usage instructions
+└── LICENSE                   # GNU GPL v3
+```
+
+### Key Script Features
+
+```python
+#!/usr/bin/env python3
+"""
+snapshot_stream.py
+
+- Finds & opens first UVC camera (/dev/video*).
+- Serves `http://<pi>:8080/stream` as low-latency MJPEG.
+- Args: --host, --port, --fps, --quality, --buffersize.
+"""
+import glob, time, signal, sys, argparse, logging, cv2
+from flask import Flask, Response
+
+# …[see full script in repo]…
+
+Args:
+
+    --fps 25 (max)
+
+    --quality 30 (JPEG)
+
+    --buffersize 1 (OpenCV CAP_PROP_BUFFERSIZE)
+
+Logging for startup & frame-read failures
+
+Graceful shutdown on SIGINT/SIGTERM
+```
+
+### Systemd Unit (snapshot-stream.service)
+
+Auto-restarts on failure with a 1 s delay
+
+Hardcodes default port 8080, but you can change it via ExecStart arguments or an EnvironmentFile
+
+```bash
+[Unit]
+Description=MJPEG Snapshot Streamer
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/snapshot_stream.py \
+    --host 0.0.0.0 --port 8080 --fps 25 --quality 30
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Change to port 9090:
+```bash
+ExecStart=/usr/local/bin/snapshot_stream.py \
+    --host 0.0.0.0 --port 9090 --fps 25 --quality 30
+```
+
+
+### Usage
+```bash
+sudo apt update
+sudo apt install python3-opencv python3-flask
+pip3 install -r requirements.txt
+```
+
+```bash
+sudo cp snapshot_stream.py /usr/local/bin/
+sudo cp snapshot-stream.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now snapshot-stream
+```
+Stream URL: http://192.168.1.50:8080/stream <-- Your RBPi's IP or Tailscale
+
+Ingestors tested: VLC (desktop & mobile), QVR Pro (QNAP), web browsers
+
+### Results
+
+- Stable 640 × 480 JPEG stream at 25 fps
+
+- No USB bus panics under sustained load
+
+- Low CPU usage (~10–15 %), no audio
+
+- Headless + remote management via Tailscale/SSH
+
+### Lessons learned:
+
+When the USB-OTG bus can’t handle a real-time encode & transport pipeline, switch to a snapshot-based MJPEG server.
+
+Simple HTTP multipart streams can be surprisingly robust on constrained hardware.
+
+A minimal Flask + OpenCV service is easier to tune & debug than full-blown RTSP or FFmpeg pipelines.
+
+# Update 2025-07-05: Simplified Workflow
+## Background
+
+Why reinvent the wheel when the solution already exists?
+I discovered that pure MJPEG frame capture and restreaming is a well-established approach. This is exactly how OctoPi manages to run smoothly on an RPi3 with a USB camera. It’s not “streaming” in the modern sense, but this is how webcams worked back in the day. Fun fact: one of the very first Internet use cases was watching a coffee pot drip!
+
+## MJPG-Streamer
+
+First, install the mjpeg-streamer-experimental fork, which works well with Raspberry Pi:
+
+```git clone https://github.com/jacksonliam/mjpg-streamer.git```
+
+You’ll also need the following libraries and cmake:
+
+```apt install -y git build-essential libjpeg-dev libv4l-dev cmake```
+
+Then build and install:
+
+```
+cd mjpg-streamer/mjpg-streamer-experimental
+make
+make install
+```
+
+Find your device ID (usually ```/dev/video0```). Then run mjpg_streamer to capture MJPEG frames. You can control the frame rate with ```-f``` and resolution with ```-r```.
+
+Example:
+```
+mjpg_streamer \
+  -i "input_uvc.so -d /dev/video0 -r 1280x720 -f 20 -q 80" \
+  -o "output_http.so -w /usr/local/share/mjpg-streamer/www -p 8080"
+```
+Make sure port ***8080*** is available.
+
+## Systemd Service
+
+Create ```/etc/systemd/system/mjpg-streamer.service```:
+
+```
+[Unit]
+Description=MJPG-Streamer webcam service
+After=network.target
+
+[Service]
+# Make sure we respawn on crash
+Restart=always
+RestartSec=1
+
+# Run as your mjpg-streamer user (replace 'pi' if different)
+User=********
+Group=********
+
+# Point to the installed binaries & plugins
+ExecStart=/usr/local/bin/mjpg_streamer \
+  -i "input_uvc.so -d /dev/video0 -r 1280x720 -f 20" \
+  -o "output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www -c admin:****************"
+
+# Log to journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then reload systemd and enable the service:
+
+```
+systemctl daemon-reload
+systemctl enable mjpg-streamer
+```
+
+Check status and logs:
+
+```systemctl status mjpg-streamer.service```
+
+If you make changes, restart the service:
+```systemctl restart mjpg-streamer```
+
+## Summary
+
+You now have a perpetually running service that captures JPEG frames from any webcam—even on low-powered devices like the Raspberry Pi 3—and serves them over the network. This simulates “modern” webcam streaming using simple, lightweight tools.
+
+In other words: you can do this today with hardware you already have—no need to buy a CCTV system!
