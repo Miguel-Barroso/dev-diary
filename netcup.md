@@ -786,3 +786,53 @@ nekocafe-staging turned out to share nekocafe prod's ~44,000-image media library
 clone), so its bulk job was kicked off detached (`docker exec -d ... > /tmp/ewww-bulk.log`) and
 left running on the box past the end of this session — it survives disconnect, nothing else is
 blocked on it finishing.
+
+## 2026-07-22 — Root-owned wp-content, a plugin-update sweep, and the stock-cruft reseed bug
+
+Started from one complaint: EWWW Image Optimizer and Super Page Cache wouldn't update on
+nekocafetime.com, wp-admin erroring "some files could not be copied" for basically every file
+in each plugin. `stat` inside the container told the story immediately —
+
+> 💡 **`docker exec`'s default user is root, and it leaves a paper trail.** The whole
+> `ewww-image-optimizer` and `wp-cloudflare-page-cache` trees were `root:root`, 644/755, while
+> Apache/PHP runs as `www-data` (uid 33). WordPress's file-copy update path can't overwrite or
+> unlink a file it doesn't own, so it fails silently per-file and surfaces as this one vague
+> error. Root cause: `wp-content` was rsynced into the Docker volume as root over SSH during the
+> original SiteGround migration, and ownership was never normalized afterward.
+
+Fix was a straight `docker exec <container> chown -R www-data:www-data /var/www/html/wp-content`.
+Checked the other four prod sites on a hunch (same migration recipe, same landmine) and all four
+had it too — mostly scoped to the `redis-cache` plugin folder (added post-migration, same root
+rsync habit), plus a stray `mu-plugins` root-owned file on ebihara. Fixed all five, verified with
+`find wp-content -not -user www-data | wc -l` → 0 everywhere.
+
+With updates actually installable again, ran a full plugin sweep across the estate. WordPress
+core was already 7.0.2 (latest) on all five — no core updates needed. Plugins: 2 on nekocafetime
+(EWWW, SPC), 1 each on miguelbarroso and ebihara-solutions (EWWW), 3 on drivejapanchill (EWWW,
+SPC, Astra Starter Sites), 2 on omi-house (EWWW, SPC). All patch-level bumps, all updated clean,
+all five sites verified 200 after.
+
+While auditing plugin lists site by site, noticed **Hello Dolly and Akismet on every single
+site** — inactive everywhere except an actively-configured Akismet on nekocafetime (real API
+key, already filtering real comments). Asked why they keep coming back after "the docker images
+refresh," which sent me into the `wordpress:php8.3` image's entrypoint script:
+
+> 💡 **Hello Dolly can never be permanently deleted from a stock WordPress container — by
+> design, sort of.** Only `wp-content` is a named volume; the rest of the webroot is recreated
+> from the image on every container start. The entrypoint's reseed logic loops over
+> `wp-content/*/*/` (two levels deep) and skips re-copying anything that *already exists* at the
+> destination — that's what lets a persisted, still-installed Akismet survive rebuilds. But
+> `hello.php` is a lone file sitting directly in `wp-content/plugins/`, not a directory, so the
+> glob never matches it and the "already exists" check never applies. Delete it and it just comes
+> back on the next rebuild, forever — while Akismet only comes back if its whole directory is
+> ever fully removed. The actual fix has to happen at build time: `RUN rm -rf
+> /usr/src/wordpress/wp-content/plugins/hello.php` (and `akismet`, where unused) in each site's
+> Dockerfile, so there's nothing left in the source tree for the entrypoint to copy.
+
+Deleted `hello` (all 5 sites) and `akismet` (the 4 sites where it was inactive dead weight —
+left it alone on nekocafetime), plus a dormant `astra-sites` (Starter Templates, only needed
+during the original theme import, not for ongoing operation) on drivejapanchill. Added the
+`rm -rf` build step to all five Dockerfiles — `Dockerfile.prod` for nekocafe (hello.php only,
+Akismet stays), plain `Dockerfile` for the other four (both) — committed and pushed to each
+site's repo so the fix is live on the next rebuild instead of a one-time cleanup that quietly
+undoes itself.
