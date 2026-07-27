@@ -836,3 +836,108 @@ during the original theme import, not for ongoing operation) on drivejapanchill.
 Akismet stays), plain `Dockerfile` for the other four (both) — committed and pushed to each
 site's repo so the fix is live on the next rebuild instead of a one-time cleanup that quietly
 undoes itself.
+
+## 2026-07-27 — Memory reclamation: staging deleted, MySQL capped estate-wide
+
+Box had been sitting at ~2.6 GB available with **3 GB paged into swap**. Nothing was
+individually misconfigured — it was six MySQL instances (five prod plus staging) on 8 GB, each
+one reasonable on its own and collectively too much. Worked through `HANDOFF-perf-memory.md` in
+the estate repo.
+
+First, cheap and unrelated: disabled Vaultwarden's `/admin` panel by blanking `ADMIN_TOKEN`.
+`vault.miguelbarroso.com/admin` now hits the `admin_disabled` route instead of a login form —
+one less internet-facing credential prompt on the box whose whole job is holding passwords.
+Verified from the box with `curl --resolve vault.miguelbarroso.com:443:127.0.0.1`, since
+Cloudflare's bot fight mode eats a plain `curl` from the laptop and just hangs there. See
+[[vaultwarden-netcup]].
+
+Then killed `staging.nekocafetime.com` outright rather than merely stopping it. It hadn't been
+touched since the migration, and it was a full clone of prod — an entire WordPress + MySQL pair
+and ~14 GB of volumes, to keep a copy of a site that already gets backed up nightly. Dumped the
+DB (18 MB gz) and tarred `wp-content` (7.9 GB) into `/home/mb/site-backups/staging-final/` first,
+then deleted the app *with volumes* from the Coolify UI and removed the orange-clouded DNS record
+(which was serving 503 by then anyway). Also stripped the `EXCLUDE_UUID` branch out of
+`site-db-backup.sh` and `site-files-backup.sh` — a hardcoded "skip staging" special case with no
+staging left to skip is just a tripwire for whoever reads it next. `tar` complained `file changed
+as we read it` partway through, which is a warning rather than corruption; confirmed with
+`gzip -t` and a full `tar -tzf` listing before deleting anything. Net disk 84G → 77G used: the
+volumes were bigger than that, but the 7.9 GB archive stays on the box as insurance.
+
+Then the actual work — capping MySQL on all five prod sites.
+
+> 💡 **`performance_schema` is where the memory went, not the buffer pools.** Instinct says a
+> memory-hungry MySQL means an oversized `innodb_buffer_pool_size`, and that's where I started
+> looking. But `performance_schema` pre-allocates its instrumentation tables **at startup, sized
+> off `max_connections` and `table_open_cache`, regardless of whether anything ever reads them** —
+> 200-400 MB per instance here, on servers whose entire dataset is smaller than that. Nobody on
+> this box has ever run a query against `performance_schema`. Six instances × ~300 MB of
+> observability nobody observes is most of the deficit right there. `--performance_schema=OFF`
+> plus a right-sized pool (256M for nekocafe, 64M for the other four) took combined MySQL RSS from
+> **1787 MB to 870 MB**.
+
+> 💡 **Don't take a connection cap from a runbook — measure it first.** The handoff I'd written
+> earlier prescribed `max_connections=40` across the board, which is the kind of number that looks
+> conservative and is actually a landmine. Checked `Max_used_connections` before applying it:
+> nekocafe had peaked at **44** on 2026-07-22, and Apache is prefork with `MaxRequestWorkers=150`,
+> so a burst can legitimately ask for far more than 40. Under-capping doesn't degrade gracefully;
+> it surfaces to visitors as "Error establishing a database connection". Used 100 for nekocafe and
+> 60 for the rest — roughly 2× observed peak. The reasoning that makes this free: once
+> `performance_schema` is off, the autosizing that made `max_connections` expensive is gone, so a
+> tight cap now buys almost no memory and only adds outage risk. Size it for safety, not for RAM.
+> (Related red herring: every server showed ~46,900 `Aborted_connects`, which reads like a
+> brute-force attempt until you divide uptime by ten — it's the healthcheck's unauthenticated
+> `mysqladmin ping` every 10 s, 472,280 / 10 ≈ 47,228.)
+
+Applied with `phase0/mysql-cap.py`, an idempotent little editor that anchors on each compose's
+existing `--max_allowed_packet` line, preserves indentation and adds the flags only if absent,
+followed by `docker compose up -d --no-deps --no-build mysql` per site. `--no-build` matters:
+without it Coolify's compose will happily rebuild the WordPress image and restart the web tier
+too, turning a database restart into a site outage.
+
+> 💡 **`/data/coolify/applications/<uuid>/docker-compose.yaml` is generated output, and I got the
+> reason wrong first.** Redeployed drivejapanchill deliberately to test persistence, and the caps
+> vanished — file md5 changed, live server back to `performance_schema=1 / max_connections=151 /
+> pool=128M`. I explained this as Coolify's database being the source of truth and overwriting the
+> file from stored config, and wrote that into both the handoff and memory. Miguel pushed back:
+> *"I find it strange that Coolify's db would take precedence over the repo. That doesn't make any
+> sense."* Correct, and the pushback was the useful part. The apps are `build_pack=dockercompose`
+> sourced from **GitHub**; Coolify clones the repo on every deploy, transforms the compose (its own
+> labels, `container_name`, uuid-prefixed volume names) and writes that file. Coolify's DB stores
+> only *pointers* — repo, branch, compose path — never compose content. There is no "DB over repo"
+> precedence at all; it's plain "git is the source, that file is a build artifact." Same observable
+> behaviour, completely different mental model, and the wrong one would have sent the next person
+> hunting for a Coolify setting that doesn't exist. Useful tell for confirming what's actually
+> deployed: the built image tag **is** the git commit SHA, so
+> `f91tesu9lkk8zaiamtttl8im_wordpress:8778eb4f…` matches `git rev-parse HEAD`. See
+> [[coolify-deploys-from-github]].
+
+So the caps only really exist once they're in each site's repo. Added them to the four
+`docker-compose.yaml` files and to `nekocafe-staging/docker-compose.prod.yaml` (which is,
+confusingly, nekocafe **production**'s compose), committed and pushed all five. Checked
+`gh api repos/.../hooks` first — no repo has a webhook, so pushing doesn't trigger a redeploy and
+the pushes were safe to make outside a maintenance window.
+
+Last piece: made a silent revert self-detecting. `estate-versions.py` (host cron, 06:20) now
+carries a `MYSQL_CAPS` table and compares every live server against it, folding any mismatch into
+the `/versions` drift report as e.g. `drivejapanchill max_connections=151 (want 60)`. It keys off
+each container's `MYSQL_DATABASE` env rather than container names, which are uuid-prefixed and
+change on redeploy. A server it *can't* read is deliberately not counted as drift — that's an
+outage, which the main health check already owns, and following the same rule as the version
+collectors means "unknown" can never page anyone at 3am. Verified with both a negative and a
+positive control. This mattered because the failure mode here is invisible: no error, no log
+entry, nothing at all until the box is quietly back in swap weeks later.
+
+Ended at 3982 MB available and **swap fully drained to 0** after a manual `swapoff -a && swapon -a`
+(swap doesn't return itself once the pressure is gone — the pages just sit there). All five MySQL
+at `swap=0`, PSI flat at 0.00 throughout, every site 200 after. A day later it's holding at
+~3.6 GB available with 39 MB swap. Full writeup in [[estate-memory-reclamation]].
+
+**Still outstanding:** nekocafe production deploys out of a repo literally called
+`nekocafe-staging`, which is now pure legacy and actively misleading — needs renaming in its own
+session, since it touches a live prod deploy path ([[rename-nekocafe-staging-repo]]). `/versions`
+still flags **MySQL 8.0 as EOL since 2026-04-30**; capping memory doesn't change that, and an 8.4
+LTS migration is the eventual real fix. `estate-health/`, `phase0/` and the handoff docs still
+aren't in any git repo — `~/Development/estate-hosting/` is a folder of repos, not a repo itself,
+so those files exist on exactly one laptop. And from 2026-07-10, ebihara's
+`ewww-force-cwebp.php` mu-plugin is *still* only on the running container, not in its repo, so a
+full image rebuild will wipe it ([[ewww-imagick-png-crash]]).
