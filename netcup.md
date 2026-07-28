@@ -1089,3 +1089,148 @@ datadir against ~400 MB for everyone else, plus live Stripe orders. Beyond that:
 `nekocafe-staging` repo still needs renaming ([[rename-nekocafe-staging-repo]]), and
 `estate-health/`, `phase0/` and these handoff docs still aren't in any git repo, so they exist on one
 laptop. Full incident record in [[estate-redeploy-stampede]].
+
+## 2026-07-28 (later) — MySQL 8.4, and three premises that turned out to be wrong
+
+Same day, second sitting. The 8.0 → 8.4 LTS migration finished: **all five sites on 8.4.11**,
+digest-pinned to `sha256:b3b90af2…`. The interesting part isn't the migration, which was dull. It's
+that three separate things I or the runbook asserted confidently turned out to be false, and each
+one was only caught by going and looking.
+
+### The migration itself was boring, which was the point
+
+Every site looked identical: data dictionary `80023→80300`, then server upgrade `80046→80411`, ~5 s
+of actual upgrade, deploy start→healthy ~45 s, public downtime ~57 s of clean 500/502/503 from the
+origin — never a Cloudflare 525. One site at a time, per the rule the stampede taught.
+
+The pre-flight technique is worth keeping: **don't diff release-note prose looking for removed
+variables — run the real binary.** `docker run --rm --entrypoint mysqld mysql:8.4 --validate-config
+<the flags>` exits 0 only if every flag still exists. I validated it with a negative control
+(`--default_authentication_plugin=…` → `unknown variable`, aborts) so that a clean exit actually
+means something. Both estate flag sets passed unchanged. `--entrypoint mysqld` is mandatory: the
+image's entrypoint intercepts first and demands `MYSQL_ROOT_PASSWORD`, which fails in a way that
+looks like a config error and isn't.
+
+Two refinements to the snapshot step. `docker compose stop` defaults to a **10 s** SIGTERM window
+before SIGKILL, which would quietly make the "cold" copy merely crash-consistent — use `stop -t 120`
+and confirm `Shutdown complete` in the logs before copying. And commit locally *first*, push only
+after the snapshot exists, because the site is down between `stop` and the deploy finishing.
+
+Memory cost, since the whole previous session was about memory: an 8.4 instance sits at **~190 MB
+RSS** against ~70 MB for the 8.0 it replaced, same caps. Despite that, swap *fell* 1155→350 MB
+across the migration and available stayed ~4.1 GB.
+
+### Wrong premise 1 — "nekocafe is 10× the data"
+
+The runbook said nekocafe needed its own sitting because its datadir is 4.6 G against ~400 M
+everywhere else. It does. But **~4.0 GB of that is binary logs**; the actual schema is **403 M**, in
+line with the other four. Its dictionary upgrade took **0.2 seconds**. The size-based fear was
+misplaced — the real reason to isolate nekocafe is that it's *transactional*: a live store taking
+orders, not a brochure.
+
+### Wrong premise 2 — the verification step, as written, was a revenue risk
+
+Step 6 said to verify nekocafe with a **Stripe test-mode order end-to-end**. Taken literally that
+means setting `testmode=yes` in `woocommerce_stripe_settings` on the **live** store — which routes
+any real customer checkout during that window to the test gateway. ~1 order/day and 25 active
+subscriptions, so even a five-minute window is a real chance of eating a payment, for a post-migration
+smoke test.
+
+The step's *intent* was "prove orders still persist", not "exercise Stripe's test gateway". So:
+`wc_create_order()` with a real in-stock product → `calculate_totals()` → `save()` →
+`wp_cache_flush()` → cold `wc_get_order()` read-back with assertions → three-table reporting join →
+`delete(true)`. Never calls `payment_complete()`, never leaves status `pending`, so no customer
+email, no stock movement, no Stripe call. Plus a read-only `GET /v1/balance` to prove the rebuilt
+container can still read its credentials. Both passed. And the best evidence was neither: **Action
+Scheduler completed a real production job at 18:16 JST, five minutes after recovery.**
+[[no-live-testmode-on-production]]
+
+### Wrong premise 3 — mine, about the binlogs, and the better bug underneath it
+
+Having found those 4 GB of binlogs, I described them as **stale** and worth reclaiming, and wrote
+that into two documents. Then I was asked to delete them *if confirmed stale*, went to confirm, and
+they weren't. All five run the default `binlog_expire_logs_seconds=2592000` (30 days), replication is
+off everywhere (`SHOW REPLICAS` empty, `gtid_mode=OFF`, `server_id=1`), and every file dated
+2026-06-28 or later. MySQL was rotating them correctly the whole time. Estate total 4.54 GB on a disk
+at 36% with 155 G free. Nothing to reclaim, and nothing urgent either.
+
+The conditional in the request is what saved it. "Remove them **if confirmed stale**" turned a
+plausible-sounding cleanup into a check, and the check failed.
+
+But going to look found something better. `site-db-backup.sh` dumped with `--single-transaction
+--quick --routines --triggers` and **no `--source-data`** — so the dumps recorded no binlog
+coordinates. Thirty days of binary logs, dutifully retained, with **no coordinate to replay from**.
+Recovery could only ever land on a nightly dump: up to 24 hours of orders unrecoverable, on a store
+with 25 subscriptions. The 4.5 GB was buying literally nothing.
+
+Fixed by adding **`--source-data=2`** to the dump. The `=2` matters — it writes the position as a
+*comment*, so restoring a site can never accidentally try to configure replication. Verified across
+all five: every dump now carries `-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='binlog.0000NN',
+SOURCE_LOG_POS=…`, and zero uncommented `CHANGE` statements anywhere. PITR is now: restore the dump,
+then `mysqlbinlog --start-position=<pos> binlog.NNNNNN | mysql`. Retention lines up — 14 kept dumps
+against 30 days of binlogs. (Note 8.4 replaces `--master-data` with `--source-data`; the old flag
+still exists but is deprecated.)
+
+That's the shape of the thing: the cleanup I proposed was wrong, and the reason it was wrong pointed
+at a real gap in the backups that had been there since 2026-07-01.
+
+### estate-versions.py had a blind spot the migration walked straight into
+
+Updating the EOL table to 8.4 (2032-04-30, cross-checked against `endoflife.date/api/mysql.json`,
+which also matched the existing 8.0 entry exactly — so the table's convention is Oracle's Extended
+Support end) turned up two real bugs.
+
+`c_mysql()` sampled **`names[0]` only**. Fine while all five were identical; but during a
+half-finished estate-wide migration it reports the whole estate as done or not-started depending on
+which container `docker ps` happened to list first. That was the literal state of the box an hour
+earlier. It now reads every server, reports the spread, and keys the EOL check off the **oldest**
+version present, so one site left behind is what gets reported.
+
+And the 8.4 change would have created a false alarm on its own: once MySQL stopped being EOL,
+`classify()` would have fallen through to `unknown / "upstream lookup failed"` — which reads as a
+*broken monitor* — because MySQL is deliberately digest-pinned with no upstream poll. Added an
+explicit `no_upstream` case so "deliberately not tracked" and "lookup failed" stop looking alike.
+Accepted consequence, recorded so it isn't a surprise later: **nothing now tells us about new MySQL
+patch releases.** That's the price of the pin, and the pin exists because there's no downgrade.
+
+`MYSQL_CAPS` needed no change — checked empirically (`mysql_caps.breaches: []`), not assumed.
+
+### "Do we expose publicly what versions we're on?"
+
+Asked in passing, and the premise inverted on inspection. The *monitoring* endpoint is fine:
+without the token, `/`, `/versions`, `/health`, `/status`, `/metrics` all **404**; only `/livez`
+answers unauthenticated and it discloses nothing. MySQL isn't exposed at all — container-internal
+network only, so the migration changed nothing about the public surface.
+
+The **sites** are the exposure, to anyone: `x-powered-by: PHP/8.3.32` on all five, `WordPress 7.0.2`
+via the generator meta *and* the `/feed/` generator tag (removing only the meta tag is the half-fix
+people stop at), `/readme.html` returning 200 on all five, and plugin versions readable straight off
+the asset `?ver=` strings — contact-form-7 6.1.6, content-control 2.6.5, instagram-feed 6.11.4,
+mailchimp-for-woocommerce 6.1.1, WPML 5.0.0, Elementor 4.2.0.
+
+Honest framing: mass scanners don't read versions, they fire exploits blind, so hiding versions stops
+roughly none of the traffic actually hitting these sites. The gain is against a *targeted* attacker,
+who currently gets a free plugin inventory and can go straight to a known CVE without the noisy
+probing Wordfence would flag. Plugin CVEs — not core, not PHP, not the DB engine — are the dominant
+WordPress compromise vector, so the `?ver=` strings are the most significant line in that list.
+
+Decision: **do nothing.** Everything is current, Wordfence and the CF WAF are in front of it, and
+this is hygiene rather than a hole. Recorded in [[estate-version-disclosure]] with the cheap fixes if
+it's ever worth an hour. One standing note there: **don't strip the plugin `?ver=` strings.** They're
+the cache-busting key, so removing them breaks asset invalidation on deploy — a real operational cost
+against an attacker who could fingerprint by asset checksum anyway.
+
+### Status (2026-07-28, end of day)
+
+`/versions` reads `mysql 8.4.11 ok`, caps clean on all five, `/` returns `OK`. Remaining drift is
+docker 29.6.1→29.6.2, host reboot-required, and 6 pending apt security updates — none of it MySQL.
+
+The five `_data.pre84-20260728` snapshots (~6.2 GB) are **still there**, deliberately: reverting the
+compose tag does not undo a dictionary upgrade, so they are the entire rollback story. One-month
+hold, delete **2026-08-28**, tracked as a task rather than a cron `rm -rf` — an unattended deletion of
+the only rollback, with no health gate, is a bad trade for 6.2 GB on a disk with 155 G free.
+
+Still outstanding otherwise: rename the `nekocafe-staging` repo (production deploys from it), and
+`estate-health/` — including `estate-versions.py`, which is the estate's entire monitoring brain —
+still isn't in any git repo. The box copy is a copy, not history. That one has been on the list long
+enough that it's starting to count as a decision rather than a backlog item.
