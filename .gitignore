@@ -7,3 +7,8 @@ secrets.txt
 
 # Added by ggshield
 .cache_ggshield
+
+# Tool caches
+.serena/
+.claude/
+.tokensave/
