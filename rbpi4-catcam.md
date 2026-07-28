@@ -1,5 +1,5 @@
 # Streaming with Raspberrypi 4 and C525 webcam
-**Last updated: 2026-06-20**
+**Last updated: 2026-07-28**
 
 > **2026-06-20:** The MJPEG + VLC-window-capture pipeline described below is **superseded**. The Pi now hardware-encodes H.264 and pushes it as RTMP to the Mac Mini's nginx, which OBS ingests directly — no screen capture, and it runs over WiFi. See **[2026-06-20 Update — H.264 over WiFi → RTMP](#2026-06-20-update--h264-over-wifi--rtmp-supersedes-the-vlc-window-capture)** at the end. The MJPEG sections remain as reference.
 ## Background
@@ -287,4 +287,66 @@ nginx-RTMP already has an `application live { live on; }` block, and OBS ingests
 - `h264_v4l2m2m` is hardware, so the Pi's CPU stays near idle.
 - The C525's `mjpeg @ … unable to decode APP fields` warning is harmless.
 - `iw` / `tc` / `rfkill` ship on Raspberry Pi OS but live in `/usr/sbin` (not on the non-login SSH `PATH`) — call them by full path.
+
+---
+
+## 2026-07-28 Update — WiFi watchdog (auto-recover from the brcmfmac wedge)
+
+The Pi occasionally dropped off WiFi after AP flukes and never came back — only a power cycle fixed it. Known Pi 3/4 behaviour, and it's **not** (only) power-save: powersave has been off here since 2026-06-20 and it still happened. The real culprit is the `brcmfmac` FullMAC firmware wedging after a disconnect: `wlan0` still looks up to Linux, wpa_supplicant never receives a disassoc event, scans return empty, so NetworkManager sees nothing to reconnect to. An `ip link set wlan0 down/up` does *not* clear this state — only reloading the kernel module (or rebooting) does. Fix is three layers:
+
+### 1. Stop NetworkManager from giving up
+NM's default `connection.autoconnect-retries` is 4 — after four failed attempts it blocks the profile until "something" (often nothing, headless) triggers a rescan. `0` means retry forever:
+```bash
+sudo nmcli con modify preconfigured connection.autoconnect-retries 0
+```
+This alone fixes the cases where the radio is fine but NM stopped trying. It can't fix a wedged firmware, hence:
+
+### 2. Escalating watchdog (files in `rbpi4-catcam/`)
+`wifi-watchdog.timer` runs `wifi-watchdog.sh` every minute. It pings the **wlan0 connection's own gateway** (`nmcli -g IP4.GATEWAY device show wlan0`, not the default route — eth0 owns that when the maintenance cable is in) with `ping -I wlan0`, so it tests the WiFi path specifically. On consecutive failures it escalates:
+
+| consecutive fails | action |
+|---|---|
+| 1 | log only — give NM its own chance |
+| 2 | `nmcli device disconnect` → rescan → `nmcli connection up preconfigured` |
+| 4 | `modprobe -r brcmfmac_wcc brcmfmac` → `modprobe brcmfmac` → reconnect (clears the wedge) |
+| 6+ | reboot — skipped if uptime <10 min (boot-loop guard) |
+
+Worst case is back on air in ~6 minutes with zero human involvement. Design notes:
+- Counter lives in `/run` (tmpfs) so a reboot resets it.
+- Stage 2 deliberately avoids `nmcli radio wifi off` — NM persists that flag in `/var/lib/NetworkManager/NetworkManager.state`, and a power cut mid-toggle would boot the Pi with WiFi permanently off. Instead every failure pass runs `rfkill unblock wifi` + `radio wifi on` as idempotent safety.
+- `brcmfmac_wcc` is unloaded first: on kernels ≥6.1 it holds a reference that makes `modprobe -r brcmfmac` fail.
+- `TimeoutStartSec=90` on the service: a truly dead firmware can hang `modprobe -r`; systemd kills the run and the counter keeps marching toward reboot.
+
+Install (from this repo):
+```bash
+scp rbpi4-catcam/wifi-watchdog.* <pi-user>@<pi-lan-ip>:
+ssh <pi-user>@<pi-lan-ip>
+sudo install -m 755 wifi-watchdog.sh /usr/local/sbin/
+sudo install -m 644 wifi-watchdog.service wifi-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wifi-watchdog.timer
+```
+Verify and live-test:
+```bash
+sudo systemctl start wifi-watchdog.service   # one manual pass
+journalctl -u wifi-watchdog -f               # then block the Pi's MAC at the AP and watch the ladder climb
+```
+
+### 3. Hardware watchdog for full kernel hangs (belt and braces)
+Some "never came back" incidents are the whole kernel hanging, which no userspace script survives. The BCM2711 has a hardware watchdog; let systemd pet it:
+```bash
+# /etc/systemd/system.conf
+RuntimeWatchdogSec=15    # bcm2835_wdt max is 15s
+```
+```bash
+sudo systemctl daemon-reexec
+```
+If the kernel locks up, the SoC resets itself after 15 s instead of waiting for a human with a power plug.
+
+### Bonus fix: `catcam-rtmp.service` could rate-limit itself to death
+During a long network outage ffmpeg exits fast (connection refused), and systemd's default start limit (5 starts / 10 s) can put the service into permanent `failed` — stream stays dark even after WiFi recovers. Disable the limit:
+```ini
+# in [Unit] of catcam-rtmp.service
+StartLimitIntervalSec=0
+```
 
