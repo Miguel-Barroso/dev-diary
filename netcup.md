@@ -1234,3 +1234,70 @@ Still outstanding otherwise: rename the `nekocafe-staging` repo (production depl
 `estate-health/` — including `estate-versions.py`, which is the estate's entire monitoring brain —
 still isn't in any git repo. The box copy is a copy, not history. That one has been on the list long
 enough that it's starting to count as a decision rather than a backlog item.
+
+## 2026-07-28 (last) — A 7.9 GB question, and the dead-man's switch that was dead
+
+Third sitting, and the plan was ten minutes of chores. The handoff's last item asked something
+small: the deleted staging site left a 7.9 GB `wp-content` tarball in `/home/mb/site-backups/
+staging-final/`, so *set an expiry, and check whether the QNAP is copying that thing nightly.*
+
+The answer to the second half is no, and it's the kind of no worth writing down because I'd have
+guessed wrong. The pull mirrors it — it's under `site-backups/`, which goes across recursively with
+`--delete` — but the options are `rsync -rt`, and `-rt` skips any file whose size and mtime already
+match. So the archive moved **exactly once**, in the 06:00 run that morning, and then never again. A
+dry run put a number on it: **86 MB would transfer, out of 34.67 GB present**. The cost of keeping it
+is 7.5 GB standing on both sides, not bandwidth. Netcup is at 36 %, the QNAP at 69 %. Nothing to fix.
+
+I set the expiry at 90 days — delete 2026-10-25 — as a task rather than a cron, same reasoning as the
+pre84 snapshots. Also confirmed there is no retention logic for that directory *anywhere*:
+`site-files-backup.sh` prunes only its own `files/` tree to `KEEP=2`, and a grep across
+`/usr/local/bin/` for `staging-final` or `find … -mtime` matches nothing. It would have sat there
+forever.
+
+### The part that wasn't a chore
+
+To measure the transfer I had to actually run the pull, which meant reading `pull.log`, which is
+where the ten minutes ended. **The off-site mirror had been failing every single run since the day
+before, and had told nobody.**
+
+Three faults, tangled together.
+
+The one that matters most is the silence. `netcup-pull.sh` sources its SMTP settings from an env
+file, and if that file is missing, `mail_configured()` returns false and every `send_mail` becomes a
+no-op. Not an error — a deliberate back-compat no-op I'd written on 2026-07-02 so an unconfigured
+install wouldn't spew failures. The env file was at `/root/.config/netcup-pull.env`. **On a QNAP,
+`/root` and `/etc` are firmware-managed and don't survive updates.** It was gone, probably around
+07-09. So the failure alerts didn't fire, and the weekly "still alive" heartbeat didn't fire either.
+The dead-man's switch was itself dead, and the design guaranteed it would die quietly.
+
+The tell, for next time: `.last_success_mail` still held the install-day epoch, and the whole log had
+exactly **one** `email sent` line, dated 2026-07-02. A heartbeat that hasn't beaten since installation
+is not a healthy system, it's a system whose only evidence of health is the moment you set it up.
+
+The user spotted the cause before I did — I'd started fixing this by putting things in `/root` and
+was told, correctly, that the QNAP would eat them. Key and env file both now live under
+`/share/IT/Netcup/`, on the real volume. Relocated key verified authenticating.
+
+Fault two: the `vault-backups` leg fails every run with `Permission denied (13)` on
+`vaultwarden.env.pre-admin-disable-20260727`. That file is `root:root 0600`; rrsync runs as **`mb`**.
+It's the only file under either backup tree not owned by `mb`. The fix isn't to chown it — it holds a
+plaintext `ADMIN_TOKEN`, and chowning it would fix the error by *starting* to copy a credential
+off-site. It should move out of the mirrored tree entirely.
+
+Fault three: the `site-backups` leg fails intermittently with a **destination-side** temp file
+vanishing mid-transfer (`stat ".wp-content-….tar.gz.QalTfM" failed`). That's what two concurrent
+`--delete` rsyncs in one directory look like. Corroborated by the log: the 07-26 run never wrote a
+"done" line, and the 07-27 run took **7.5 hours** at 127 KB/s against a cron that fires every 24. No
+lockfile in the script. Needs `flock`.
+
+### One trap worth remembering
+
+A dry run of the vault leg returns **rc=0**. It's a lie. `--dry-run` never opens the files, so a
+`Permission denied` on read cannot possibly surface. I nearly filed that leg as healthy on the
+strength of it. Same family as the rule that an origin-side 200 isn't verification: the cheap check
+and the real check were measuring different things, and the cheap one was reassuring.
+
+The honest summary is that the backups themselves were fine throughout — Netcup kept dumping, the
+site-backups leg kept mostly landing. What failed was the layer whose entire job is to tell me when
+something fails. Three weeks of that is three weeks of believing a green light that wasn't connected
+to anything.
