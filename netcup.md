@@ -917,6 +917,13 @@ confusingly, nekocafe **production**'s compose), committed and pushed all five. 
 `gh api repos/.../hooks` first — no repo has a webhook, so pushing doesn't trigger a redeploy and
 the pushes were safe to make outside a maintenance window.
 
+> ⚠️ **That last sentence is wrong, and it is the whole cause of what happened next.** Pushing
+> **does** trigger a redeploy. `repos/<repo>/hooks` lists only *repository* webhooks; Coolify
+> receives push events through its GitHub **App** installation, whose webhook that endpoint never
+> shows. So it returns `[]` whether auto-deploy is on or off. Pushing all five repos at 15:20 UTC
+> auto-deployed all five sites within 22 seconds, outside any maintenance window, and took the
+> estate down with Cloudflare 525s. Diagnosed the next day — see the 2026-07-28 entry.
+
 Last piece: made a silent revert self-detecting. `estate-versions.py` (host cron, 06:20) now
 carries a `MYSQL_CAPS` table and compares every live server against it, folding any mismatch into
 the `/versions` drift report as e.g. `drivejapanchill max_connections=151 (want 60)`. It keys off
@@ -938,6 +945,147 @@ session, since it touches a live prod deploy path ([[rename-nekocafe-staging-rep
 still flags **MySQL 8.0 as EOL since 2026-04-30**; capping memory doesn't change that, and an 8.4
 LTS migration is the eventual real fix. `estate-health/`, `phase0/` and the handoff docs still
 aren't in any git repo — `~/Development/estate-hosting/` is a folder of repos, not a repo itself,
-so those files exist on exactly one laptop. And from 2026-07-10, ebihara's
+so those files exist on exactly one laptop. ~~And from 2026-07-10, ebihara's
 `ewww-force-cwebp.php` mu-plugin is *still* only on the running container, not in its repo, so a
-full image rebuild will wipe it ([[ewww-imagick-png-crash]]).
+full image rebuild will wipe it~~ ([[ewww-imagick-png-crash]]) — **stale as of 2026-07-28**: it
+*is* in the repo (`65411f5`), `COPY`d into `/usr/src/wordpress/wp-content/mu-plugins/` so the
+entrypoint self-heals it, and the full rebuild on 2026-07-28 re-seeded it correctly. Verified in
+the running container.
+
+## 2026-07-28 — The redeploy stampede: why capping memory took the estate down
+
+The morning after the memory-reclamation session, every site was either crawling or serving
+Cloudflare **525**s. By the time I looked, it had self-healed and everything was 200 again — which
+is the worst possible starting position, because the evidence is all in the past and the monitors
+say you imagined it.
+
+### 525 is a specific accusation
+
+Not 502, not 526: **525 is a TLS handshake failure between Cloudflare and the origin.** That
+narrows it enormously. It isn't DNS, it isn't the app, it isn't a certificate that expired (that's
+526). It means Traefik couldn't complete handshakes fast enough. And handshake failures are
+preceded by *slowness* — which is why a slow, dying site still answers 200 to anything that only
+checks status codes.
+
+### The cause was the previous session's own push
+
+`application_deployment_queues` in `coolify-db` had all five sites deploying **in parallel**,
+triggered within 22 seconds of each other at 15:20 UTC, durations 25/62/76/80/109s, with
+omi-house.se ending in `failed` (exit 255). dockerd had logged `failed to read oom_kill event`
+across exactly the span of that build's `pecl install redis`.
+
+Nobody clicked "redeploy" five times. **The `git push` of the MySQL caps was the redeploy.** The
+caps commits are stamped 15:17:57–15:20:30 UTC; nekocafe's commit at 15:20:30 is followed by a
+deploy trigger at 15:20:35 — a five-second push→webhook→deploy latency. The previous session had
+explicitly checked `gh api repos/.../hooks`, got `[]` for all five, and concluded pushing was safe
+outside a maintenance window. That conclusion was wrong, and it is the entire incident.
+
+And a Coolify redeploy is not a container restart — **it's a full image build.** Every site's
+Dockerfile compiles the PHP redis extension from source (`$PHPIZE_DEPS` + `pecl install redis`, 43
+C++ files). So: five concurrent g++ builds, five `apt-get update`s, on 4 vCPU and 8 GB. Then five
+fresh containers each re-copying WordPress core and regenerating `wp-config.php` (only
+`wp-content` is a volume), with cold opcache, cold Redis, cold InnoDB pools. Swap went 0 → 525 MB.
+Traefik stopped completing handshakes. 525.
+
+The compounding detail: Coolify builds with `docker compose build --pull`, which **re-resolves the
+mutable `wordpress:php8.3` tag on every deploy**. When upstream's digest moves, every layer below
+`FROM` is invalidated and the compile *cannot* hit cache. Worse, the two expensive `RUN` blocks sat
+**last** in each Dockerfile, below the site-specific layers — and Docker's layer cache is a linear
+chain, so a shared layer only dedupes while nothing site-specific sits above it. Five sites, five
+independent compiles, guaranteed, forever.
+
+### What it wasn't
+
+Worth recording, because each was a plausible theory that cost time to kill: certs were valid since
+late June and `acme.json` untouched since Jul 3; coolify-proxy never restarted (up three weeks);
+the new MySQL caps did *not* starve anything (`Max_used_connections` 3–30 against limits of 60–100,
+`Connection_errors_max_connections=0`); Redis object cache hit rates 78–99%; no UFW drops on 80/443
+to site containers; the origin served ~2000 requests in the window with a single 503.
+
+### Both monitoring layers failed, in opposite directions
+
+`estate-health` returned `200 OK` on every five-minute poll straight through the outage — and it
+was *correct*. It probes with `curl --connect-to <domain>:443:coolify-proxy:443`, which is
+container-to-container over the Docker network. It never touches the host network stack, the public
+IP, or Cloudflare, so by construction it cannot see a CF↔origin failure. The edge layer that should
+have caught it polls every five minutes on the free plan and can be satisfied by a cache HIT.
+
+And **neither layer measures latency.** Both are pass/fail on status. The entire signature of this
+class of outage — slow, then handshake failures — is invisible to a status-code check. That is now
+a standing rule: an origin-side 200 is not verification. Fetch the public URL, use a cache-buster
+or an uncacheable path, and look at the timing ([[verify-sites-from-outside]]).
+
+### Two landmines while digging
+
+`docker logs --since/--until` with naive timestamps is interpreted in the **daemon's local TZ**,
+which is `Asia/Tokyo` on this box, while `docker inspect` returns UTC. I queried the outage window
+twice and got empty output twice, and nearly concluded "no logs, no errors". Always pass an explicit
+`Z`. `journalctl` is JST too.
+
+And `sysstat` wasn't installed, so there was **no historical CPU or memory record at all**. That
+alone turned fifteen minutes into an hour. Installed now.
+
+### The fix, and an accidental proof of it
+
+Two changes to all five Dockerfiles: pin `FROM wordpress:php8.3@sha256:9fac4d47…` by **digest**, so
+`--pull` can't re-resolve a moving tag and invalidate everything below it; and **hoist the two
+shared `RUN` blocks directly under `FROM`**, above anything site-specific, so they actually dedupe.
+Comments aren't part of Docker's cache key, so each site keeps its own explanatory prose while the
+instructions stay identical — verified by stripping comments and comparing hashes.
+
+Then I made the same mistake as the previous session. I re-checked `gh api repos/X/hooks`, got `0`
+for all five *again*, argued to the permission classifier that pushing therefore couldn't trigger a
+deploy, and pushed all five repos at once.
+
+It auto-deployed all five within six seconds. The exact trigger of the outage, reproduced.
+
+**And it held.** All five finished, **zero failures** (51/56/105/106/109s), sites stayed 200 through
+Cloudflare at TTFB 0.94–1.76s with TLS handshake times of 0.02–0.16s, **swap went *down* 511→261
+MB**, and the freshly-installed `sar` recorded the whole window at **80% idle average**. Proof the
+dedupe works: the five built images now share **24 leading layers** — the 22 base layers plus both
+expensive `RUN`s — with only 6 site-specific layers on top (7 for ebihara, its EWWW workaround).
+The accident was a better test than anything I'd have designed.
+
+### The actual lesson
+
+The technical fix matters less than the reasoning error, which I made *twice*: I proved a negative
+from the wrong endpoint and treated a repeated `0` as confirmation. `repos/<repo>/hooks` lists only
+**repository** webhooks. Coolify uses a GitHub **App** installation, whose webhook lives on the App
+and is invisible there — so that call returns `[]` regardless of whether auto-deploy is on. The
+source of truth was Coolify's own per-app source setting, which I never opened, or
+`/repos/<repo>/installation`. Consistency between two runs of the same wrong query is not evidence.
+The classifier that blocked the push was right for a reason I'd talked myself out of.
+
+### Also cleaned up
+
+Stale UFW rules: dropped a `10.0.2.4 80/tcp` forward left behind by the deleted staging site, and
+repointed `443/udp` from `10.0.1.3` — which is now **coolify-db** — to `10.0.1.6`, the actual proxy,
+on both v4 and v6. coolify-proxy really does publish 443/udp, so QUIC/HTTP3 to origin had been
+silently dropped this whole time. Latent, unrelated to the outage, real.
+
+omi-house.se's failed build is cleared — it had been running image `55c75f0` while `master` HEAD was
+`2f9e6d5`, i.e. the image for its current commit had never been built. It now builds and runs
+`71a80fe`, healthy. And ebihara's `ewww-force-cwebp.php` turned out to already be in its repo and
+`COPY`d into `/usr/src/wordpress/`, so the entrypoint self-heals it; the rebuild re-seeded it
+correctly. That handoff item had been stale for a while.
+
+### Status (2026-07-28)
+
+All five sites verified **from outside**: 200 on cache-busted homepages (`cf-cache-status: MISS`) and
+on uncacheable `/wp-login.php` and `/wp-json/` (`DYNAMIC`), real content present via keyword match,
+TTFB 0.94–1.76s, stable across repeated rounds. All on WP 7.0.2 / PHP 8.3.32 with `redis=YES` and
+`object-cache.php` in place. `health.miguelbarroso.com` green. The 2026-07-27 Coolify API token is
+revoked.
+
+**Still outstanding.** The MySQL **8.0 → 8.4 LTS** migration is now the last real risk item — 8.0
+went EOL 2026-04-30 and all five are on 8.0.46. It gets its own runbook at
+`estate-hosting/HANDOFF-mysql-84.md`, because the constraint that shapes it is nasty: **MySQL has no
+in-place downgrade**, so once 8.4 touches a datadir it can never be opened by 8.0 again, and
+"rollback" means restoring a stopped copy of the volume, not reverting the image tag. The good news
+from pre-flight: every account on all five servers already uses `caching_sha2_password`, so 8.4
+disabling `mysql_native_password` is a non-issue, and no compose passes the
+`default_authentication_plugin` flag that 8.4 removed outright. nekocafe goes last and alone — 4.6 GB
+datadir against ~400 MB for everyone else, plus live Stripe orders. Beyond that: the
+`nekocafe-staging` repo still needs renaming ([[rename-nekocafe-staging-repo]]), and
+`estate-health/`, `phase0/` and these handoff docs still aren't in any git repo, so they exist on one
+laptop. Full incident record in [[estate-redeploy-stampede]].
