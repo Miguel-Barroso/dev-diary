@@ -350,3 +350,21 @@ During a long network outage ffmpeg exits fast (connection refused), and systemd
 StartLimitIntervalSec=0
 ```
 
+## SSH access corrected (2026-07-28)
+
+The Mac's `~/.ssh` LAN entry for this Pi had been pointing at an address the Pi doesn't hold. Nothing
+noticed because everything reaches it over Tailscale; the LAN alias is the shortcut for when the
+tailnet is the thing being debugged, which is exactly when you don't want to discover it's wrong.
+
+The real address came from `hostname -I` over Tailscale, cross-checked against a Raspberry Pi OUI in
+the Mac's ARP table. AdGuard on the Mac Mini holds a DHCP reservation for this Pi, so the address is
+pinned — the config entry simply predated the reservation.
+
+Connecting then failed with `Host key verification failed`, which is just first-contact on an address
+`known_hosts` had never seen. Rather than trusting it blind I pulled the host key over the
+already-trusted Tailscale session and compared fingerprints before accepting it — same key, same
+machine. The stale entry for the old address was removed.
+
+Both the Tailscale and LAN entries now also answer to `catcam` alongside the `raspberrypi4` names, so
+existing scripts are unaffected.
+

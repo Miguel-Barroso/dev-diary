@@ -219,7 +219,7 @@ Since the corruption turned out to be SPS/PPS (not bandwidth), re-tested running
 on WiFi only. Re-enabled WiFi (commented `dtoverlay=disable-wifi` in
 `/boot/firmware/config.txt`, reboot). Box uses **NetworkManager** now (not the
 `wpa_supplicant.conf` the old diary describes); saved conn "preconfigured", **wlan0
-static .50**, eth0 .51. Access is over **Tailscale** (`100.121.233.34`, per-node, so it
+static .50**, eth0 .51. Access is over **Tailscale** (`<pi3-tailnet-ip>`, per-node, so it
 survives an eth↔wifi switch — `ssh raspberrypi3` → that IP).
 
 Result: **WiFi is unfit for the CCTV upload.** Signal was strong (−50 dBm, 0% loss on
@@ -650,3 +650,15 @@ If you make changes, restart the service:
 You now have a perpetually running service that captures JPEG frames from any webcam—even on low-powered devices like the Raspberry Pi 3—and serves them over the network. This simulates “modern” webcam streaming using simple, lightweight tools.
 
 In other words: you can do this today with hardware you already have—no need to buy a CCTV system!
+
+## SSH alias, and a box that stopped answering (2026-07-28)
+
+Tidying the Mac's SSH config, this Pi's entry now answers to `cctv` as well as `raspberrypi3`, so the
+alias says what the machine does rather than which board it happens to be. The old name still works —
+both are on the same `Host` line — so nothing that already referenced it needs changing.
+
+Open, and not a config problem: **this Pi has been off the tailnet for two days.** Tailscale reports
+it last seen 07-26, and the address in the config is confirmed correct, so it isn't a routing or key
+issue. Given the history in this log — the Broadcom WiFi chip on this board wedging hard enough to
+need the recovery script — the likely candidates are that same wedge with the watchdog not catching
+it, or power. Needs hands on the hardware, so it's noted here rather than solved.

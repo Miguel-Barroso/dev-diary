@@ -332,3 +332,57 @@ Final State
 ✔ Restart policy added for resilience
 ✔ HTTP/HTTPS ports correctly exposed
 ✔ Vaultwarden accessible via secure HTTPS
+
+⸻
+
+# The off-site pull key, and how wide it reaches (2026-07-28)
+
+Context: Vaultwarden itself moved off this box to Netcup back on 06-30. What the QNAP does now is
+hold the off-site copy of the estate — it pulls from Netcup over SSH on a cron.
+
+While splitting up SSH keys on the Netcup side, I edited that box's `authorized_keys`, which meant
+proving this machine could still reach it afterwards.
+
+## An error that looks like a failure and isn't
+
+Testing the pull key interactively returns:
+
+```
+rrsync error: SSH_ORIGINAL_COMMAND does not rsync
+```
+
+That is the key working exactly as intended. It's restricted with a forced `rrsync` command, so it
+refuses interactive shells by design. A real authentication failure says `Permission denied
+(publickey)` instead. Worth knowing which is which before assuming the backups are broken.
+
+To actually prove the path I ran a read-only `rsync --list-only` over the key, which returned a real
+file listing from Netcup. That's the test that means something — the same lesson as the `--dry-run`
+trap that nearly had me file a broken backup leg as healthy.
+
+## What the listing showed
+
+Two things, both queued as work rather than fixed in this sitting — see the resolution note below,
+which is why they're written up at all:
+
+1. **The rrsync root is the whole home directory.** The listing includes `.bash_history`, `.bashrc`,
+   `.profile` — none of which are backups. The key only needs the backup trees. Narrowing it is the
+   same least-privilege move as splitting the keys was, and it carries a specific risk: too narrow a
+   root breaks the pull *silently* on the next cron run rather than failing at change time, so every
+   path the pull touches (including the Vaultwarden leg) has to be enumerated and dry-run first.
+
+2. **A 6.3 GB `neko-uploads-pre-ewww-*.tar` from 06-24 sits inside that root**, so it's standing on
+   both sides of the mirror. The EWWW rollout it predates completed on 07-10 and has been stable
+   since, so it's very probably obsolete — but the pull mirrors with `--delete`, which means removing
+   it at the source also removes the only off-site copy. That's a decision to make deliberately, not
+   a side effect to discover later.
+
+> 💡 **Resolved 07-30, before this entry went public.** Both items above are closed. Each leg of the
+> pull now has its own key jailed to its own rrsync root — one for the site backups, one for the
+> vault — instead of the two of them sharing the home directory. That also settles item 2 as a
+> security question: the rollback tar sits outside both roots now, so the pull key can't see it at
+> all. Whether to delete the tar is still open, but it's a housekeeping call about disk, not an
+> exposure. Writing up an open hole on a public repo is the thing to avoid; writing up a closed one
+> is the point of keeping the diary.
+
+Key and env file remain under `/share/...`, not `/root` — see the 07-28 entry in `netcup.md` for why
+that rule exists and what it cost to learn.

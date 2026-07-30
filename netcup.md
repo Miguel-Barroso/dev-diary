@@ -12,7 +12,7 @@ is the curated story.
 
 Provisioned the Netcup VPS on 2026-06-22 as phase 0:
 
-- Hostname `ebihara-prod-nbg1`, `185.170.115.77`, Nuremberg
+- Hostname `ebihara-prod-nbg1`, `<netcup-ip>`, Nuremberg
 - Ubuntu 24.04, 8 GB RAM / 4 vCPU / 256 GB
 - **Coolify** (self-hosted PaaS) drives everything, with **Traefik** as the reverse proxy
   issuing **Let's Encrypt** origin certs, all sitting behind the **Cloudflare** proxy.
@@ -120,7 +120,7 @@ Email here uses **SureMail**, not wp-mail-smtp, and it has a nasty quirt:
 > `\SureMails\Inc\Settings::instance()->encrypt_all($settings)`.
 
 Cutover 2026-06-28 — origin swap, Full(strict), SureMail→Resend:2465. Coolify resource id=5,
-uuid `i12r3yn80azojzlrny1lcqmo`.
+uuid `<coolify-uuid>`.
 
 ## Site 4 — drivejapanchill.com (the easy one)
 
@@ -143,7 +143,7 @@ the most work, which is why I left it for last:
    to repoint WP transactional to Resend and move the mailbox to Migadu, while preserving
    inbound during the window.
 
-Web cutover 2026-06-30. Coolify uuid `shvrvnw47lss2929zgynrxzz`. The booking widget and the
+Web cutover 2026-06-30. Coolify uuid `<coolify-uuid>`. The booking widget and the
 six pages rendered green, `blog_public=1`, no `new.` leaks.
 
 > 💡 SSH to the SiteGround hosts kept failing with "Too many authentication failures" because
@@ -243,7 +243,7 @@ Same night, one more thing onto the box. My self-hosted **Vaultwarden** (the Bit
 server) had been running on the QNAP TS-453 Pro in Container Station — a `vaultwarden`
 container behind a `caddy-cloudflare` front-end doing a DNS-01 cert — published at
 `vault.miguelbarroso.com` but reachable **only over Tailscale**: the public A record pointed
-at the QNAP's tailnet IP (`100.92.18.72`), which is routable only inside Tailscale. So every
+at the QNAP's tailnet IP (`<qnap-tailnet-ip>`), which is routable only inside Tailscale. So every
 time I switched VPNs and dropped the tailnet the vault went dark — reliably at the exact
 moment I needed a password. Moved it onto the Netcup box so my partner and I always have
 access, tunnel or not.
@@ -254,7 +254,7 @@ A Coolify one-click **Vaultwarden Service** in the same `coolify-netcup-estate` 
 routed by the same Traefik + Let's Encrypt, behind the same Cloudflare. `DOMAIN=
 https://vault.miguelbarroso.com`, `SIGNUP_ALLOWED=false` (both accounts already exist), and
 Coolify auto-generates a 64-char `ADMIN_TOKEN`, so the `/admin` panel is enabled (the QNAP
-setup had none). Resource uuid `d12ji94o0qj6l2y1df1qhusw`, named volume `…_vaultwarden-data`
+setup had none). Resource uuid `<coolify-uuid>`, named volume `…_vaultwarden-data`
 → `/data`. **Orange-clouded** — consistent with the rest of the box and keeps the origin out
 of DNS.
 
@@ -413,7 +413,7 @@ auth error even on a broad token) — the owner flipped it per-zone in the dashb
 Right after enabling everything, the owner got Wordfence-locked out of **omi-house.se**. The
 diagnosis turned out to be a feature, not a bug:
 
-> 💡 The block was on the owner's **real** IP (`112.136.1.184`, a Japanese ISP), reason:
+> 💡 The block was on the owner's **real** IP (`<owner-ip>`, a Japanese ISP), reason:
 > *"Used an invalid username `info@omi-house.se` to try to sign in."* They'd logged in with
 > the **email**, but the WP username is `omi_admin` — and the "lock out invalid usernames
 > immediately" rule I'd enabled did its job. The silver lining: WF seeing the *real* client IP
@@ -493,7 +493,7 @@ Only **nekocafe** is a real store, so it's the only site where a staging environ
 keep (testing plugin/WP-core updates before they touch live orders and subscriptions). The
 four brochure sites don't need one. And staging is **disposable** — it can be rebuilt from a
 nekocafe prod backup whenever it's actually needed — so it doesn't warrant backing up at all.
-I excluded `staging.nekocafetime.com` (`q14agh2oi1831q9ewogcq615`) from *both* scripts.
+I excluded `staging.nekocafetime.com` (`<coolify-uuid>`) from *both* scripts.
 
 ### The pre-migration sweep
 
@@ -908,7 +908,7 @@ too, turning a database restart into a site outage.
 > behaviour, completely different mental model, and the wrong one would have sent the next person
 > hunting for a Coolify setting that doesn't exist. Useful tell for confirming what's actually
 > deployed: the built image tag **is** the git commit SHA, so
-> `f91tesu9lkk8zaiamtttl8im_wordpress:8778eb4f…` matches `git rev-parse HEAD`. See
+> `<coolify-uuid>_wordpress:8778eb4f…` matches `git rev-parse HEAD`. See
 > [[coolify-deploys-from-github]].
 
 So the caps only really exist once they're in each site's repo. Added them to the four
@@ -1235,7 +1235,7 @@ Still outstanding otherwise: rename the `nekocafe-staging` repo (production depl
 still isn't in any git repo. The box copy is a copy, not history. That one has been on the list long
 enough that it's starting to count as a decision rather than a backlog item.
 
-## 2026-07-28 (last) — A 7.9 GB question, and the dead-man's switch that was dead
+## 2026-07-28 (third) — A 7.9 GB question, and the dead-man's switch that was dead
 
 Third sitting, and the plan was ten minutes of chores. The handoff's last item asked something
 small: the deleted staging site left a 7.9 GB `wp-content` tarball in `/home/mb/site-backups/
@@ -1301,3 +1301,114 @@ The honest summary is that the backups themselves were fine throughout — Netcu
 site-backups leg kept mostly landing. What failed was the layer whose entire job is to tell me when
 something fails. Three weeks of that is three weeks of believing a green light that wasn't connected
 to anything.
+
+## 2026-07-28 (fourth) — One key for everything, and what a passphrase doesn't buy
+
+Meant to be five minutes of tidying: `~/.ssh/config` still had all five SiteGround host blocks in
+it, four weeks after the accounts expired. Removing dead config turned into the most useful hour of
+the day.
+
+### The config was describing a network that no longer exists
+
+The SiteGround entries were the obvious part — `ssh.omi-house.se` doesn't even resolve any more.
+The interesting one was the Pi 4's LAN entry, which pointed at an address nothing answers on. The
+Pi's real LAN address was somewhere else entirely, confirmed two ways: `hostname -I` over Tailscale,
+and a Raspberry Pi OUI in the Mac's ARP table. AdGuard on the Mac Mini holds a DHCP reservation for
+it, so this was never lease drift — the config was simply written before the reservation existed and
+nobody had used that alias since.
+
+Fixing the address surfaced a second thing. The connection then failed with `Host key verification
+failed`, which looks alarming and wasn't: `BatchMode=yes` turns the first-contact trust prompt into
+a hard error instead of a question. Rather than accept it blind, I pulled the host key over the
+already-trusted Tailscale path and compared — identical. That's the one moment in SSH where the
+entire security model rests on a human not clicking "yes" reflexively, and it costs about fifteen
+seconds to do properly.
+
+### What a passphrase actually buys
+
+The question that made the session worth writing up: should I passphrase every private key, so that
+an agent rummaging around can't walk off with them?
+
+Mostly no, and the reasoning matters more than the answer. A passphrase encrypts the key **at rest**
+— stolen laptop, leaked backup, a copied file. Real, but that's the whole of it. It does nothing
+against a process running as me. The moment I use the key it's in `ssh-agent`, and from then on
+anything running as `mb` can ask the agent to sign a challenge and authenticate as me everywhere,
+without ever reading a byte of the key. And `UseKeychain yes` — which I'd been carrying on some
+hosts without thinking about it — stores the passphrase in the login keychain and supplies it
+automatically, so in daily use the key is unlocked whenever I am. The protection collapses back to
+at-rest again.
+
+What actually addresses that threat: `ssh-add -c`, which makes the agent demand confirmation for
+every signature; `ssh-add -t` to bound its lifetime; and, properly, hardware-backed keys
+(`ed25519-sk` or Secure Enclave) where the private material can't be extracted at all and every
+authentication needs a physical touch. No software agent forges a touch.
+
+So: no passphrases. Split the keys instead, because blast radius was the real problem and I'd been
+looking straight past it.
+
+### Splitting netcup off
+
+One key — the same `id_ed25519` — authenticated netcup (all five production sites plus Vaultwarden),
+the QNAP (which holds the off-site copies of all of it), both Pis and the Mac Mini. A single
+compromise of that one file took the estate *and* its backups in the same motion. Writing that
+sentence out is what made it obvious.
+
+netcup now has a dedicated key, pinned with `IdentitiesOnly yes` so the agent can't quietly fall
+back to another identity and hide a broken config behind a working connection. Then the part that
+makes it real: the shared key was removed from netcup's `authorized_keys` and verified **rejected**.
+A separation you haven't watched fail isn't a separation, it's an intention. `authorized_keys` was
+backed up first, and the QNAP pull key left strictly alone.
+
+Six now-dead SiteGround private keys were still sitting in `~/.ssh` on the Mac. Deleted.
+
+### The pull key answered a question I hadn't asked
+
+Testing whether the QNAP could still reach netcup after I'd edited `authorized_keys`, the response
+was `rrsync error: SSH_ORIGINAL_COMMAND does not rsync`. That reads like breakage and is the exact
+opposite — it's the forced command refusing an interactive shell, which is the restriction doing its
+job. A genuine auth failure says `Permission denied (publickey)`. Knowing which error means what is
+the difference between a calm morning and a panicked one.
+
+Then I proved the real path with a read-only `--list-only` rsync, which is the same lesson as the
+dry-run trap from the previous sitting: test the mechanism you actually care about, not a
+neighbouring one that's cheaper to reach.
+
+That listing showed two things worth fixing, both handed to the backups thread rather than done
+here: the rrsync root was the whole home directory, `.bash_history` and all, when it only needs the
+backup trees — and the `neko-uploads-pre-ewww-*.tar` rollback artefact was sitting inside that root,
+so it was on both sides of the mirror. Both are closed as of 07-30: each leg of the pull now has its
+own key jailed to its own rrsync root, which narrows the key *and* puts the tar outside what the key
+can read. Details in the `qnapbox66` entry.
+
+### Getting at the sites now that SiteGround is gone
+
+Worth recording because the muscle memory is wrong: there is no webroot and no SFTP any more.
+
+WP-CLI lives inside each site's container — `docker exec -u www-data <container> wp …`. **Don't
+hardcode container names**: they carry a timestamp suffix that changes on every Coolify deploy.
+Resolve by the container's `SERVICE_FQDN_WORDPRESS` env var instead. Files are a named volume per
+site holding `wp-content`, and host-side edits are live in the container immediately — anything
+created as root needs chowning to `www-data` afterwards, the same trap as the `wp-content/upgrade`
+ownership bug from the migration.
+
+One genuine casualty of the 8.4 move that hadn't shown up until now: `wp db check` fails on all five
+sites with a TLS error. MySQL 8.4 presents a self-signed cert and the mariadb-check bundled in the
+WordPress image won't verify it. `--skip-ssl` fixes it. Only the `mysqlcheck` path is affected —
+`wp db query`, `db size` and `db export` are all fine, and the backups never touched it because
+`site-db-backup.sh` dumps through the MySQL container's own `mysqldump`. Which is the second time
+this month that keeping the backup path independent of the convenience path has paid off.
+
+### And this file was publishing the origin IP
+
+Found while updating it: `netcup.md` had the real origin IP in the box's spec line, in a **public**
+repo, contrary to this diary's own stated redaction policy. Redacted now, but redaction is not
+retraction — it's been pushed, and git history and any clone still have it. The origin IP matters
+here specifically because the sites sit behind Cloudflare; anyone holding it can address the box
+directly and skip the WAF entirely. The durable fix isn't editing markdown, it's making the origin
+refuse anything that didn't come from Cloudflare.
+
+### Status (2026-07-28, fourth sitting)
+
+All five sites verified on WP 7.0.2 / PHP 8.3.32, DB dumps current, off-site pull proven working
+end to end after the key change. The Pi 3 running the CCTV has been offline two days — physical, not
+network.

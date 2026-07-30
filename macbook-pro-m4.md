@@ -888,3 +888,55 @@ This reduces:
 - inconsistent transient states
 
 The lockfile mechanism prevents overlapping backup runs.
+
+---
+
+# SSH config and key hygiene (2026-07-28)
+
+Four weeks after the estate moved off SiteGround, `~/.ssh/config` still described the old world.
+Cleaned it out and, more usefully, stopped using one key for everything.
+
+## What the config was getting wrong
+
+Five dead SiteGround host blocks, for accounts that expired on 07-01. One of those hostnames doesn't
+resolve at all any more.
+
+The Pi 4's LAN entry pointed at an address nothing answers on. Its actual LAN address is different —
+confirmed with `hostname -I` over Tailscale and a Raspberry Pi OUI in the ARP table. AdGuard on the
+Mac Mini holds a DHCP reservation for that Pi, so this wasn't lease drift; the entry predated the
+reservation and nothing had used the alias since.
+
+`known_hosts` still had the old address and nothing for the new one, so the first connection failed
+with `Host key verification failed` — which under `BatchMode=yes` is just the trust-on-first-use
+prompt turned into an error. I compared the offered host key against one pulled over the
+already-trusted Tailscale path before adding it. Same key. Removed the stale entry.
+
+The `github.com` block was decorative: that account has **zero** SSH keys registered, so it had never
+authenticated once. The GPG keys on the account are for commit signing, which is a different
+mechanism that shares a word. Signing works fine (`commit.gpgsign = true`, commits verify). Pushes go
+over HTTPS with a token. Block removed rather than left lying.
+
+## One key for everything
+
+`id_ed25519` authenticated netcup (five production sites plus Vaultwarden), the QNAP holding the
+off-site backups, both Pis and the Mac Mini. One file, whole estate, backups included.
+
+Considered passphrasing everything and decided against it — a passphrase protects the key **at rest**
+and does nothing about a process running as me, because once the key is in `ssh-agent` anything
+running as my user can have it sign without ever reading it. `UseKeychain yes` makes that worse by
+supplying the passphrase automatically. The real answers are `ssh-add -c`, `ssh-add -t`, or
+hardware-backed keys where the material can't be extracted and each use needs a touch. Full reasoning
+in `netcup.md`.
+
+So: separate keys instead. netcup got its own, pinned with `IdentitiesOnly yes` so the agent can't
+silently fall back to another identity and mask a broken config. Verified in both directions — new
+key in, old key rejected.
+
+Also deleted six SiteGround private keys that were still sitting in `~/.ssh` long after their hosts
+were gone. Dead credentials are still credentials.
+
+## Current shape
+
+`~/.ssh` now holds exactly two keypairs: the general one, and the netcup-only one. Config covers
+netcup, the QNAP, both Pis (with purpose aliases `cctv` and `catcam` alongside the old hostnames, so
+existing scripts keep working), the Pi 4 on LAN, and the Mac Mini.
