@@ -552,3 +552,90 @@ Tested whether the OBS Media Source could hardware-decode the incoming H.264 via
 - So VAAPI (decode *or* encode) can't work in the Flatpak OBS here — the chip is capable, but the Flatpak dropped Gen7 support. Almost certainly why VAAPI encode was flaky before and x264 was the right call.
 
 Decision: stay on **software decode + x264 software encode**; `auto-cpufreq` handles thermals. Hardware accel would need a *native* (non-Flatpak) OBS using the host i965 — not worth it for a ~5 % decode saving. Installed `intel-gpu-tools` for the test (kept).
+
+## 2026-07-31 — key-only SSH, and the DNS rule that has to go in first
+
+Hardening pass across the house. This box got two changes: key-only SSH, and a place in a
+deny-by-default mesh policy. The second one is where all the thinking was.
+
+### Key-only SSH, as a drop-in rather than an edit
+
+`PasswordAuthentication no`, which governs exactly one thing: how a remote client proves who it is. It
+doesn't touch the desktop auto-login, doesn't touch passwordless `sudo`, and doesn't affect this box
+coming back unattended after a power cut — the appliance behaviour that makes it recover on its own
+(DNS, DHCP, and the livestream encode) is untouched.
+
+It's worth doing *because* of that setup rather than despite it. Auto-login plus NOPASSWD `sudo` means
+any shell on this box is root with no further check, so sshd is the entire access control, and a
+guessable password sits directly in front of it. Keys remove guessing as a category.
+
+I put it in `/etc/ssh/sshd_config.d/` instead of editing the main file, for a reason that's worth
+knowing: **sshd takes the first value it obtains, not the last**, and the `Include` line sits near the
+top of `sshd_config`. So a drop-in wins over anything later in the main file, no matter what that file
+says — and reverting is deleting one file instead of remembering what a line used to be.
+
+Then `systemctl reload ssh`, not `restart` — established sessions survive a reload, so there's no
+window where I'm locked out of a box I'm currently sitting on. (Worth checking whether yours is
+socket-activated; this one isn't, so reloading the service is what takes effect.)
+
+Verified from a new connection by asking the server what it accepts, rather than by reading back the
+file I'd just written:
+
+```bash
+ssh -vv -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=0 <host> true
+# debug1: Authentications that can continue: publickey
+```
+
+That check is the whole point — on the NAS the same test caught a second password path still open
+after I thought I'd closed it. Write-up in `qnapbox66.md`.
+
+### The DNS grant is load-bearing, and the fix lives behind the thing you break
+
+This box is the only resolver the mesh advertises. Every phone, laptop and Pi in the house resolves
+through it.
+
+A deny-by-default policy that forgets to allow `:53` therefore takes DNS out for **everything at
+once** — and the admin UI you'd use to fix it is on this same box, behind the policy you just applied.
+It's a genuinely nasty failure shape: total, instant, and it disables the tool you'd reach for.
+
+So the DNS grant is written `src: ["*"]` on purpose, wide open to every device, and commented as
+load-bearing. A tighter named list would be more correct on paper and one forgotten device away from
+taking the house offline. This is the one rule where being wrong isn't a device-sized problem.
+
+(The mesh policy console refuses to save a policy whose own test assertions fail, which is a real
+safety net — but only for the paths you thought to write tests for.)
+
+### Deny-by-default's actual cost is enumeration, not syntax
+
+The policy took several passes, and every mistake was the same mistake: a path that exists in real
+life and wasn't in the file. Writing the rules is easy. Remembering what you actually use is not,
+especially for a house you administer from the road, where "I'll just check the cameras from my phone"
+is a path nobody ever wrote down.
+
+Two that nearly slipped through, both about this box:
+
+- **The phone had SSH here and nothing else.** But this is also where the ad-blocking DNS admin UI
+  lives — the exact thing you want from a hotel room when the house's DNS is misbehaving. Granting a
+  shell and withholding the web UI would have been precisely backwards.
+- **"The cat cam is LAN, not mesh" was half true.** I'd confirmed the Pi *publishing* the stream goes
+  over the LAN, which is real: the policy can't break the stream itself. Then I nearly reasoned from
+  that to "so the cat cam isn't affected at all" — but *watching* it remotely comes back over the mesh
+  to this box, which is a different direction entirely and was denied by the draft. Publisher and
+  subscriber are not the same path, and evidence about one says nothing about the other.
+
+The habit that fixed both: probe what's actually **listening**, then ask what each of those services
+is *for*, rather than asking what rules feel sensible. `ss -tlnp` found services on this box I'd have
+sworn weren't reachable from the phone, because I'd never thought about them from that direction.
+
+### Verified afterwards, from the boxes it applies to
+
+Applying a policy and reading "saved" is not verification. What actually convinced me:
+
+- The public-facing web server can no longer reach the NAS's file shares, its shell, or this box's
+  SSH — probed from that machine, not assumed from the rules.
+- A Pi, which is granted nothing but DNS, is refused everywhere else and still resolves fine.
+- This box's own grants are exactly what the file says, read back out of the running config on the
+  node rather than off the screen I typed it into.
+- And nothing on this box *initiates* anything over the mesh — no cron, script or live connection —
+  which mattered because it's a destination in every rule and a source in none. An outbound
+  dependency here would have failed silently.

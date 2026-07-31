@@ -9,12 +9,12 @@ Self-taught developer notes from a decade of running things on my own hardware �
 ## Index
 
 ### Workstations
-- [`macbook-pro-m4.md`](macbook-pro-m4.md) — Flutter dev environment with FVM, debugging a 500 ms VPN-induced latency issue on macOS, VSCodium autocomplete recovery
+- [`macbook-pro-m4.md`](macbook-pro-m4.md) — Flutter dev environment with FVM, debugging a 500 ms VPN-induced latency issue on macOS, VSCodium autocomplete recovery, and why the machine holding every SSH key is the one nothing else is allowed to reach
 - [`x1e-pop-os.md`](x1e-pop-os.md) — ThinkPad X1 Extreme on Pop!_OS: PIA and Tailscale coexistence, UFW hardening, fixing slow `sudo`, systemd-automounted NAS shares over Tailscale
 
 ### Self-hosted infrastructure
-- [`qnapbox66.md`](qnapbox66.md) — Vaultwarden on a QNAP NAS with Caddy reverse proxy, Cloudflare DNS-01 certificates, and the hardening pass that came after I caught myself doing something dumb with secrets
-- [`macmini-2012-log.md`](macmini-2012-log.md) — 2012 Mac Mini repurposed as a 24/7 cat-café livestream host and network-wide AdGuard DNS server, with OBS hardware encoding and AdGuard DHCP takeover
+- [`qnapbox66.md`](qnapbox66.md) — Vaultwarden on a QNAP NAS with Caddy reverse proxy, Cloudflare DNS-01 certificates, the hardening pass that came after I caught myself doing something dumb with secrets, and key-only SSH on a box where `PermitRootLogin no` would lock you out
+- [`macmini-2012-log.md`](macmini-2012-log.md) — 2012 Mac Mini repurposed as a 24/7 cat-café livestream host and network-wide AdGuard DNS server, with OBS hardware encoding, AdGuard DHCP takeover, and what it takes to put the household resolver behind a deny-by-default policy without taking the house offline
 
 ### Raspberry Pi
 - [`rbpi3-log.md`](rbpi3-log.md) — Pi 3 surveillance camera with a custom systemd-driven recovery script that revives the Broadcom WiFi chip when it hangs

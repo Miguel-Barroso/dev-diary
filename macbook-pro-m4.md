@@ -940,3 +940,55 @@ were gone. Dead credentials are still credentials.
 `~/.ssh` now holds exactly two keypairs: the general one, and the netcup-only one. Config covers
 netcup, the QNAP, both Pis (with purpose aliases `cctv` and `catcam` alongside the old hostnames, so
 existing scripts keep working), the Pi 4 on LAN, and the Mac Mini.
+
+---
+
+# Nothing gets to reach this laptop (2026-07-31)
+
+Part of a house-wide hardening pass — key-only SSH everywhere and a deny-by-default policy on the
+Tailscale mesh. The interesting decision landed on this machine, and it's the inverse of every other
+rule I wrote: **no device is granted access to this laptop at all.**
+
+## Why the admin workstation is the one thing nothing reaches
+
+The key-splitting from 07-28 is exactly what makes this necessary. This machine holds the netcup-only
+key *and* the general key — netcup, the NAS with the off-site backups, both Pis, the Mac Mini. One
+directory, the whole estate.
+
+So a shell here isn't access to a laptop, it's access to everything, plus the credentials to keep it.
+I'd written a rule saying my phone must never reach the production server; leaving the phone able to
+SSH *here* would have made that rule decorative, since the route runs straight through this machine's
+`~/.ssh`. A denial you can walk around isn't a denial.
+
+It also inverts the trust direction. The phone is the device most likely to be lost or stolen, and
+this is the most privileged box in the house. And it doesn't serve the "run the house from the road"
+goal it looked like it served — the laptop is in the same bag as the phone, while everything I'd
+actually want remotely (the NAS, the DNS box, the Pis) is granted directly.
+
+## The path that had to go, and why it cost nothing
+
+`phone → this laptop` over SSH existed and was in daily use, so removing it was a real behaviour
+change rather than tidying. The only thing it was ever used for was driving a terminal AI agent
+running on the Mac from a phone terminal — deliberately avoiding the hosted remote-control feature,
+for telemetry reasons.
+
+The honest part: **that workflow already didn't work.** The phone session couldn't attach to the one
+already running on the Mac — it forced a re-authorization and a resume, every time. So what looked
+like giving up a daily path was really deleting something that had been quietly failing for weeks. It
+went in the "refused" column with a note that the shape which *would* work is `tmux` on the Mac with
+the phone attaching to it, and that reviving it means granting this back, deliberately and
+temporarily.
+
+## Turning the door off, not just papering over it
+
+macOS **Remote Login** was on, so `tcp/22` genuinely answered over the mesh. The policy omission closes
+that from the network side, but leaving the service running and relying on a rule elsewhere to hold it
+shut is the same mistake as a firewall in front of a service you didn't need. Remote Login off, Remote
+Desktop was already off, confirmed by there being no listener at all:
+
+```bash
+netstat -an | grep LISTEN | grep '\.22 '   # no output
+```
+
+Two controls, independent, and neither one is now the only thing standing between this laptop and the
+rest of the mesh. That's the shape I want for the box that holds every key.

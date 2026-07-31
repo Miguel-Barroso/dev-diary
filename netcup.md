@@ -1412,3 +1412,36 @@ refuse anything that didn't come from Cloudflare.
 All five sites verified on WP 7.0.2 / PHP 8.3.32, DB dumps current, off-site pull proven working
 end to end after the key change. The Pi 3 running the CCTV has been offline two days — physical, not
 network.
+
+## 2026-07-31 — this box is no longer a peer of the house
+
+A hardening pass on the home network ended up being mostly *about* this machine, which I hadn't
+expected. The house edge is sealed — no forwards, nothing answering from outside — so the remaining
+way in isn't the router, it's the Tailscale mesh. And a personal tailnet defaults to **allow-all**:
+every node reaches every other node on every port.
+
+Follow that through and the worst edge in the whole house points *out of here*. This is the only box
+with a public face, so it's the one most likely to be compromised — and under allow-all it could reach
+the NAS's file shares, which is to say **every off-site backup the estate has**. The threat model I'd
+been carrying was "protect the house from the internet". The actual exposure was the production server
+being an unrestricted peer of the house.
+
+The fix is that the new mesh policy contains **no rule with this box as a source**. Not a narrowed
+grant — none at all. Two things made that easy rather than risky:
+
+- **Nothing legitimate used it.** The off-site pull runs NAS → here over the public address, not over
+  the mesh, so the backup path is untouched. Checked rather than assumed.
+- **Its DNS already didn't depend on the house.** That was fixed earlier the same week, for
+  performance reasons rather than security ones — this box had been resolving *every* lookup through a
+  Mac Mini in my living room, a 310 ms round trip per query, because the mesh handed it a routing
+  domain that captured everything. Turning that off locally took it to ~1 ms. Which means that by the
+  time I came to cut the mesh path, the dependency I'd have had to preserve was already gone.
+
+Verified afterwards from this machine rather than from the policy screen: connections to the NAS's
+file shares and shell, and to the Mac Mini's SSH and web ports, all now time out. Six months of nginx
+logs on the Mac Mini show exactly two requests from this box, both from my own port scan earlier that
+day — so there was never any real traffic on the path I removed.
+
+The general lesson, and it's one I keep relearning: **the box you hardened against the internet is
+still a full-privilege peer everywhere else you didn't think about.** Locking the front door of a
+building doesn't help if every room shares one keyring.

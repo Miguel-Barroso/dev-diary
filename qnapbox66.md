@@ -386,3 +386,115 @@ which is why they're written up at all:
 
 Key and env file remain under `/share/...`, not `/root` — see the 07-28 entry in `netcup.md` for why
 that rule exists and what it cost to learn.
+
+---
+
+# Key-only SSH, and the second password door I didn't know was open (2026-07-31)
+
+The house edge is sealed — no forwards, nothing answering from outside — so everything I can reach, I
+reach over the Tailscale mesh instead. Which means the mesh *is* the attack surface now, and a
+personal tailnet defaults to **allow-all**: every device can reach every other device on every port.
+This NAS holds the off-site copy of everything, so it's the box with the most to lose in that picture.
+
+Two changes, deliberately in this order: key-only SSH first, because it's independently revertible,
+and the mesh access policy last, so a failure is never two changes deep.
+
+## `PermitRootLogin no` would have locked me out of the box
+
+The obvious hardening line is the wrong one here. On QTS the `admin` account **is uid 0** — `id`
+returns `uid=0(admin) gid=0(administrators)` — and it's the only account sshd will accept. So
+`PermitRootLogin no` doesn't remove *root* login, it removes *all* login, and it removes it from the
+box you'd need to log into in order to undo it.
+
+The pair that actually does the job:
+
+```
+PermitRootLogin prohibit-password      # key allowed, password refused
+PasswordAuthentication no
+```
+
+## The part I got wrong, and only caught by asking the server
+
+With both lines in and sshd reloaded, I checked it the way that's worth checking — from a **new**
+connection, with the client forbidden from using a key, so the server has to say what else it will
+take:
+
+```bash
+ssh -vv -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=0 <host> true
+```
+
+```
+debug1: Authentications that can continue: publickey,keyboard-interactive
+```
+
+Still a password door open. `keyboard-interactive` is the PAM path, and it carries a password just as
+well as the one I'd just shut. It's a **separate directive**:
+
+```
+KbdInteractiveAuthentication no
+```
+
+The Pop!_OS box I hardened in the same sitting needed only `PasswordAuthentication no` — but purely
+because its shipped `sshd_config` already set the kbd-interactive line, which I'd never have noticed
+if I hadn't run the same check on both. **Nothing in either file tells you which default you're
+getting.** That's the lesson worth keeping: reading the config tells you what you wrote, not what the
+server accepts. Ask the server. Both boxes now answer:
+
+```
+debug1: Authentications that can continue: publickey
+```
+
+A related thing that can't be tested from the server side at all: whether some client out there still
+logs in *with* a password. sshd can tell you what it would accept; it cannot tell you what a client
+*would have* offered. That question only has a human answer, and getting it wrong means finding out
+when something breaks.
+
+## Editing sshd on a box whose only door is sshd
+
+The risk here isn't the config being wrong, it's the config being wrong *and* taking away the means to
+fix it. So the change went in behind a dead-man's switch: a backgrounded script that sleeps, and then
+restores the backup and reloads sshd **unless** a fresh session has touched a flag file first.
+
+```sh
+setsid sh -c 'sleep 180; [ -f /tmp/ok ] && exit 0; cp -a "$CFG.bak" "$CFG"; kill -HUP <sshd-pid>' &
+```
+
+Open a new connection, confirm it works, touch the flag, kill the sleeper. If instead I'd locked
+myself out, the box would have quietly undone it three minutes later. It never fired, but it's the
+difference between a mistake and an outage that needs physical access.
+
+Reload was `kill -HUP` on the sshd master rather than restarting the service — sshd re-execs and
+rereads its config without touching sessions that are already established, so the session I was
+sitting in was never at risk. QTS's `login.sh` restarts more than sshd, so HUP is the smaller hammer.
+
+Two QNAP-specific notes for anyone doing the same: `nohup` and `timeout` **don't exist** in that
+shell, so `setsid` and a manual kill are the way. Entware fills most of the other gaps.
+
+## Persistence on QTS is better than I'd assumed
+
+I'd written this box off as one where `/root` doesn't survive a reboot, which is true — but
+incomplete. `/etc/config` is a symlink to `/mnt/HDA_ROOT/.config`, i.e. flash, and `/root/.ssh` is a
+symlink into that same place. So the sshd config **and** the authorized keys both persist; it's only
+the directory around them that gets recreated.
+
+What isn't guaranteed is a firmware update, which can rewrite service configs. So I keep a
+checksum-matched copy of the live file elsewhere — after an update, the question "did QTS put my
+config back the way it found it" is a diff instead of a memory test.
+
+## What the NAS accepts now
+
+The mesh policy is deny-by-default, and the NAS's grants come out as:
+
+- **My admin machines** — everything.
+- **The family laptop** — every service the NAS offers **except a shell**. There's no reason for a
+  laptop to hold a session on a box whose only account is uid 0.
+- **The public-facing web server** — *nothing*. It's the machine most likely to be compromised and it
+  had no business reaching the backups; nothing legitimate used that path, because the off-site pull
+  runs the other way round and doesn't use the mesh at all.
+
+The family-laptop grant is the one where I changed my mind mid-review. My first pass gave it the media
+ports and deliberately withheld file sharing, which felt like good least-privilege — until I remembered
+her Time Machine backups run to a share on this box. **A blocked backup fails quietly and stays
+broken**, and you find out about it on the day you need it. That's a worse outcome than the port being
+reachable from a laptop I already trust, so it's granted. Least-privilege is a default, not a rule to
+follow off a cliff.
