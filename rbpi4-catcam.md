@@ -368,3 +368,35 @@ machine. The stale entry for the old address was removed.
 Both the Tailscale and LAN entries now also answer to `catcam` alongside the `raspberrypi4` names, so
 existing scripts are unaffected.
 
+## 2026-08-03 — EEPROM update, and what a reboot does and doesn't do to the stream
+
+`rpi-eeprom-update` had been reporting an update available for months and I'd been leaving it, on the
+grounds that this box is a livestream that people watch and the update needs a reboot.
+
+Worth knowing how it actually works, because it isn't what the command name suggests: it doesn't
+flash anything when you run it. It **stages** files into `/boot/firmware` and the bootloader picks
+them up on the next boot. So the update and the risk are two separate events, and you choose when the
+second one happens. Afterwards, `vcgencmd bootloader_version` for the date it's actually running, and
+`rpi-eeprom-update` again for "up to date" — check both, because the staged files are gone either
+way.
+
+Here that was a 2025-05 bootloader to a 2026-01 one. Boot came back in 11.8 s with no failed units,
+and the camera was pushing again unattended.
+
+### The part I got wrong about the consumer side
+
+I'd planned around the idea that the OBS box would need attention afterwards — reopen the media
+source, at minimum. It didn't, and the reason is worth writing down.
+
+**OBS never dropped its ingest socket.** Same PID, same established connection to the RTMP server on
+`127.0.0.1:1935`, straight through the reboot. Because the RTMP server holds the *application* open;
+it's only the **publisher** that goes away and comes back. The consumer is talking to the server, not
+to the Pi, and it has no idea the Pi rebooted at all.
+
+So the whole customer-visible blackout is the Pi's own boot window — about half a minute — and
+`Restart=always` on the push service covers the rest. No manual step on the other machine.
+
+The generalisable bit, which has now bitten me twice from opposite directions: **publisher state and
+consumer state are not the same thing, and neither is evidence about the other.** A dead publisher is
+not a dead consumer socket. Check the side you're actually asking about.
+

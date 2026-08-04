@@ -662,3 +662,67 @@ it last seen 07-26, and the address in the config is confirmed correct, so it is
 issue. Given the history in this log — the Broadcom WiFi chip on this board wedging hard enough to
 need the recovery script — the likely candidates are that same wedge with the watchdog not catching
 it, or power. Needs hands on the hardware, so it's noted here rather than solved.
+
+## 2026-08-03 — Deleting the debris from a decision I'd already made
+
+The box answers again, and I never established which of the two candidates above it was, so I'm not
+going to pretend otherwise here. What follows is from the tidy-up afterwards, which turned out to be
+the more useful half.
+
+### What was still on the box
+
+This Pi ran an RTSP stack for a while, and I ripped it out in June after it lost on grounds that had
+nothing to do with configuration. Except I didn't rip it out. What was still there:
+
+- **`v4l2rtspserver`, installed via dpkg.** Disabled and not listening — but installed, with a
+  systemd override that had been *tuned*: explicit port, codec, resolution, framerate, device.
+- A firewall rule holding its port open, on two interfaces, with a helpful comment.
+- The motion-detection script's default stream URL, still `rtsp://…`.
+- An ALSA alias in `/etc/asound.conf` that existed for exactly one reason: that server's device
+  parser chokes on the comma in `hw:CARD,DEV`, so the device needed an alias with no comma in it.
+  Nothing else on the box had ever referenced it. The current feed is MJPEG and carries no audio.
+- A source tree and the `.deb` in the home directory, and a settings file on the desktop.
+
+None of it was running. All of it read as a working setup that someone had merely forgotten to switch
+on — one `systemctl enable` from live.
+
+### The actual lesson: an artefact proves something was *tried*
+
+I know it doesn't work here, because I'm the one who found out. And I still fell for it — twice, in
+my own notes, which by this point had a paragraph pointing at the firewall rule and the `rtsp://`
+default as evidence that "this box has been configured that way before", and recommending going back
+to it. Both of those files now carry a retraction rather than a silent edit, because the wrong
+reasoning is worth having visible next to the right one.
+
+**The strength of the leftover is not evidence about the decision.** If anything it's the reverse:
+nobody tunes a thing that never ran at all, so the most convincing debris collects exactly where a
+hard problem was fought and lost. Which is the same place a fresh reader — including you, six weeks
+later — is most likely to propose fighting it again. Before reading intent into a leftover file, two
+questions settle it: is it actually *running*, and does anything say why it stopped?
+
+So: when a decision closes, delete its debris in the same change. That's not tidiness, it's what
+stops the next person re-deriving the wrong answer. History goes in a **dated archive directory**,
+never as a stray `.bak` beside the live file — I found one of those sitting in `/etc/default/` still
+holding the old `rtsp://` value, which is precisely the thing a future grep reads as current.
+Live-config-versus-dated-archive is the distinction that matters, not whether a file mentions the
+dead technology.
+
+### Two gotchas from renaming the config key
+
+The misleading key was `RTSP_URL`, in the script's defaults and in `/etc/default/`. Renaming it to
+`STREAM_URL` is a two-line change with two ways to go quietly wrong.
+
+**Rename both sides in the same change.** The script merges the env file over its defaults with
+`if key in cfg` — so an unrecognised key in the env file isn't an error, it's ignored, and the
+built-in default silently wins. Rename one side only and you get a service that starts, reports
+healthy, and streams from the wrong URL.
+
+**Don't tighten that file to `600 root:root` while you're in there.** It looks like an obvious
+hardening win, and it isn't: the script opens the file *itself*, as its own service account, not only
+via systemd's `EnvironmentFile=`. Under `600 root:root` it crashlooped on `PermissionError` — and
+`systemctl is-active` still said `active` the whole time, because between restarts it genuinely is.
+Group-read for the service account is what it needs.
+
+Which generalises: for a service whose real work is done by a child process, **verify by the child,
+not by the unit.** Here that means checking there's an `ffmpeg` under the main PID, and glancing at
+`NRestarts`. `active` on its own tells you almost nothing.

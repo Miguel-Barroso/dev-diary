@@ -639,3 +639,88 @@ Applying a policy and reading "saved" is not verification. What actually convinc
 - And nothing on this box *initiates* anything over the mesh — no cron, script or live connection —
   which mattered because it's a destination in every rule and a source in none. An outbound
   dependency here would have failed silently.
+
+## 2026-08-03 — Closing the RTMP server, and a source that was never on air
+
+Two things on this box, both found by looking at what it's *actually* connected to rather than at
+what its config files say.
+
+### nginx-rtmp's defaults are open on both sides
+
+The livestream ingest here is nginx-rtmp, and the block was as short as blocks get:
+
+```nginx
+application live {
+    live on;
+    record off;
+}
+```
+
+No `allow`, no `deny`, no `on_publish` or `on_play` — and **nginx-rtmp's default is to permit both
+play and publish.** So anything that could reach the port could watch the stream with no credentials,
+and could publish into it too. Confirmed rather than assumed, by playing it from a different machine
+on the LAN.
+
+The fix is cheap here for one specific reason: **OBS ingests from `rtmp://localhost/live/…`**, so the
+only legitimate player is loopback. That makes the tight version free —
+
+```nginx
+allow play 127.0.0.1;
+deny play all;
+allow publish 127.0.0.1;
+allow publish <pi-lan-ip>;
+deny publish all;
+```
+
+RTMP has no HTTP-Basic equivalent, so IP allow/deny is the proportionate control *because* the
+consumer is loopback. If the players were spread around the house this would be the wrong tool.
+
+Three things I'd have got wrong without checking:
+
+- **This needs `restart`, not `reload`.** nginx-rtmp keeps stream state **per worker**, and this box
+  runs `worker_processes 1`. On a reload the old worker keeps the publisher and its existing players
+  while new connections land on a fresh worker that has no stream — so it looks completely fine, and
+  then hands you a black screen at the next reconnect, unattended, hours later. A restart converges
+  it in one event. The `open socket left … aborting` lines in `error.log` afterwards are the old
+  worker draining, not a fault.
+- **Test a publish ACL with a different stream name.** I used a throwaway name, which is the only
+  reason the publish side was testable at all — a decoy can't collide with the live stream even if
+  the ACL turns out to be broken. (An earlier pass skipped testing publish entirely to avoid racing
+  the live feed, which is how it stayed untested.)
+- **`allow play 127.0.0.1` is only safe while the listener is IPv4-only.** It is here (`0.0.0.0:1935`).
+  Add an IPv6 listener later and OBS resolving `localhost` to `::1` gets *denied* by your own rule.
+  `allow play ::1;` would need to go in at the same time.
+
+Verified after: LAN playback fails, unauthorised publish gets a broken pipe, OBS still plays and the
+Pi still publishes. OBS kept its PID across the whole thing; the publisher was back in under 8 s and
+the media source re-attached itself in about 20.
+
+### A source pointing at nothing, and how not to diagnose it
+
+Separately, an OBS scene had a source pointing at an RTSP URL on an address with no listener on 554,
+which looked alarming until I checked what it was.
+
+It's a **hidden, non-rendering, non-ingesting orphan** — `visible: false`, and the running OBS
+process has no connection to `:554` anywhere. The address belongs to a Pi's *wired* interface, which
+is down on purpose because that camera was deliberately moved to WiFi; and the house's two actual
+RTSP cameras are a different vendor entirely, on their own addresses. The path in the URL is right
+for that camera family, so the source was probably typed for one of them and never corrected. It
+costs nothing and it's staying.
+
+What settled it wasn't the address. It was two things: the scene collection's `visible` flags, and
+`lsof` on the live OBS process — what it's **actually connected to**. I'd started down the path of
+treating the address as evidence about the livestream, which it never was.
+
+**And don't fix an OBS source by editing the scene JSON.** OBS holds the collection in memory and
+writes it out on exit, so a file edit gets silently clobbered the next time it closes cleanly. The
+proof it never autosaves was right there: the file's mtime was over a year older than the running
+process. The durable routes are the UI while it's running, or editing the file with OBS stopped —
+and obs-websocket isn't installed here, so there was no scripted third option.
+
+### Where AdGuard actually keeps DHCP reservations
+
+Worth knowing before you go looking, because it cost me a detour. `dhcp.dhcpv4.static_leases` in
+`AdGuardHome.yaml` is **empty**, and the dynamic pool is a narrow range at the top of the subnet — so
+every pinned address in the house looks unmanaged if you read the config file. The reservations are
+the **expiry-less entries in `work/data/leases.json`**. Nothing is statically configured on the hosts
+themselves; they're all DHCP clients.
