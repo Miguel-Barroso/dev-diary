@@ -24,7 +24,7 @@ Self-taught developer notes from a decade of running things on my own hardware �
 ### Web and games
 - [`miguelbarroso.com.md`](miguelbarroso.com.md) — `fswatch` and `rsync` continuous sync to a SiteGround WordPress install, and why I eventually abandoned the approach
 - [`nekocafetime.com.md`](nekocafetime.com.md) — WooCommerce and WPML variation-translation troubleshooting
-- [`astromeda-log.md`](astromeda-log.md) — running multiple Minecraft Bedrock servers in Docker on Windows, with automated backups via Task Scheduler
+- [`astromeda-log.md`](astromeda-log.md) — running multiple Minecraft Bedrock servers in Docker on Windows, with automated backups via Task Scheduler, and the one-line "fix" I recommended here for months that was quietly making a server unjoinable
 
 ---
 

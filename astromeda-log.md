@@ -35,7 +35,9 @@ Astromeda is my Windows gaming PC. These notes cover migrating the Minecraft Bed
 
 ### Outcome
 
-Server runs smoothly on Ubuntu 22.04 LTS (WSL2), 64 GB RAM, no swap, fully Dockerized.
+Server runs smoothly, fully Dockerized, no swap.
+
+> **Updated 2026-08-17.** The host was on Ubuntu 22.04 LTS under WSL2 when this was written; it now runs **Ubuntu 24.04 LTS**. Worth being precise about the memory figure, because it misled me later: the machine has 64 GB of physical RAM, but that is not what the containers get. With `memory=0` in `.wslconfig`, WSL2 takes its default allocation and the Linux VM sees **~31 GiB**. `swap=0` is still set.
 
 ---
 
@@ -54,12 +56,14 @@ Run multiple Minecraft Bedrock servers on a single machine while keeping:
 
 ### Key constraint
 
-A Minecraft Bedrock server can only bind to one port, so running multiple instances requires:
+A Minecraft Bedrock server binds one UDP port, so running several on one host means each one needs its own. The part that is easy to get wrong is *where* you change the port.
 
-- Each container uses the same internal port (`19132`)
-- Each container maps to a **different external port**
+- Each server gets its own port via `SERVER_PORT` (and `SERVER_PORT_V6`), so it **binds** that port inside the container
+- The Docker mapping is then **identical on both sides** — `19134:19134/udp`, not `19134:19132/udp`
 
-This is a fundamental networking constraint — only one service can use a given port per host — so multiple servers must be exposed on different external ports.
+Do not leave every container bound to `19132` internally and simply remap it externally. Bedrock advertises its own port in the ping response it sends to clients, so a container that binds `19132` keeps announcing `19132` regardless of what the host maps in front of it. Matching both sides keeps what the server says about itself true.
+
+One more reason the ports look odd: `SERVER_PORT_V6` defaults to one above the IPv4 port, so the first server occupies **19132 and 19133**. That is why the second server is on `19134` and not `19133` — `19133` was never free.
 
 ### Docker setup
 
@@ -86,6 +90,11 @@ services:
     environment:
       EULA: "TRUE"
       SERVER_NAME: "Rhen's World"
+      SERVER_PORT: "19132"
+      SERVER_PORT_V6: "19133"
+      ENABLE_LAN_VISIBILITY: "true"
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: "<RCON_PASSWORD>"
     volumes:
       - ./rhens-world/data:/data
     restart: unless-stopped
@@ -96,10 +105,15 @@ services:
     image: itzg/minecraft-bedrock-server
     container_name: bedrock-big-earth
     ports:
-      - "19133:19132/udp"   # second server, different external port
+      - "19134:19134/udp"   # second server — same port both sides
     environment:
       EULA: "TRUE"
       SERVER_NAME: "Big Earth"
+      SERVER_PORT: "19134"
+      SERVER_PORT_V6: "19135"
+      ENABLE_LAN_VISIBILITY: "true"
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: "<RCON_PASSWORD>"
     volumes:
       - ./big-earth/data:/data
     restart: unless-stopped
@@ -109,20 +123,43 @@ services:
 
 ### LAN discovery
 
-Minecraft Bedrock uses broadcast discovery on fixed ports, and Docker isolates broadcast traffic by default. Result: the servers do not appear in the in-game LAN list. This is expected behaviour in Docker environments.
+Minecraft Bedrock uses broadcast discovery on fixed ports, and Docker isolates broadcast traffic by default. Result: the servers do not show up on their own in the in-game **Friends** list, and players have to add them by address instead. That much is expected behaviour in Docker environments.
 
-Workaround — disable LAN discovery in `server.properties`:
+> ⚠️ **Correction (2026-08-13).** This entry used to recommend
+> `enable-lan-visibility=false` as the workaround for that. **The advice was
+> wrong — do not follow it.** It does not switch off a discovery mechanism that
+> wasn't working anyway; it makes the server unjoinable by *any* means,
+> including a direct address. It cost me a server for months. Full diagnosis in
+> the next section. Both servers now run `enable-lan-visibility=true`.
 
-```
-enable-lan-visibility=false
-```
-
-Players connect using direct addresses:
+Leave the setting alone and have players connect by direct address:
 
 | Server       | Address              |
 | ------------ | -------------------- |
 | Rhen's World | `192.168.x.x:19132`  |
-| Big Earth    | `192.168.x.x:19133`  |
+| Big Earth    | `192.168.x.x:19134`  |
+
+### `enable-lan-visibility=false` makes a server unjoinable (2026-08-13)
+
+Big Earth sat unjoinable for a long time, and the container reported `unhealthy` forever. Two symptoms that looked like two faults; one root cause, and it was the line I'd recommended above.
+
+**What it actually does.** BDS still answers the RakNet unconnected ping with the setting off — but with its identity string stripped. A **33-byte pong instead of ~130 bytes**: no server name, no version, no protocol number, no player count. The Bedrock client needs that payload to decide a server is joinable, so it marks the entry unreachable and never attempts a connection at all. The healthcheck fails for the same reason — the image runs `mc-monitor status-bedrock`, which reports `empty response from bedrock server`.
+
+**Why it wastes so much of your time.** Everything underneath is genuinely healthy, and every test you'd reach for first says so. Probe the port from outside with an `open connection request 1` and you get a valid `0x06` reply, byte-for-byte the shape of the working server's. Port mapping, NAT and the Windows firewall all exonerate themselves in turn, which sends you looking further out into the network — the one direction the fault isn't in.
+
+**The test that actually discriminates.** Compare the *size* of the ping payload against a server you know works. A pong that arrives but is short means config, not connectivity:
+
+```bash
+python3 -c 'import socket,struct,time
+M=bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(3)
+s.sendto(b"\x01"+struct.pack(">Q",int(time.time()*1000))+M+struct.pack(">Q",2),("<windows-host-ip>",19134))
+d,_=s.recvfrom(4096);print(len(d),d[35:])'
+```
+
+~130 bytes and a readable server name is healthy. 33 bytes is this bug.
+
+**Lesson.** "Disable the thing that isn't working" was a guess dressed up as a fix, and I wrote it down as a recommendation without ever confirming a client could still join afterwards. A setting that silently degrades a response — rather than refusing outright — buys itself months before anyone catches it.
 
 ### Folder structure
 

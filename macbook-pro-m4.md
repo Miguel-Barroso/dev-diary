@@ -114,13 +114,45 @@ The power-line backhaul caused intermittent dropouts that the Orbi mesh interpre
 
 Same week, added the MBP, Astromeda, QNAP, and Nothing Phone (2) to a Tailnet so Plex and Plexamp work from outside the house without opening ports or paying for Plex Pass remote streaming.
 
-In Plex's network settings, registered the QNAP's Tailscale IP as a custom server access URL:
+Plex ran on the QNAP at the time, so in Plex's network settings I registered the QNAP's Tailscale IP as a custom server access URL — a plain `http://100.x.x.x:32400`. It worked: clients resolved the server over Tailscale whether the device was on the home LAN, on cellular, or on hotel WiFi abroad.
 
-```
-http://100.x.x.x:32400
-```
-
-Clients now resolve the server via Tailscale whether the device is on the home LAN, on cellular, or on hotel WiFi abroad.
+> ⚠️ **Superseded (2026-08).** Both halves of that are now wrong, so don't copy
+> it. Plex no longer runs on the QNAP — it moved to Astromeda — and more to the
+> point, **a dotted CGNAT address is no longer accepted as a custom access URL
+> at all.** plex.tv sits behind Cloudflare, and the `PUT` that publishes your
+> connection list is rejected with **403** if any URI in it contains a dotted
+> `100.64.0.0/10` address. The failure isn't partial, which is what makes it
+> nasty: the *whole* update is refused, so the LAN address stops being
+> republished too and the server quietly goes stale on plex.tv while looking
+> perfectly healthy from the couch.
+>
+> What works instead is a **`plex.direct` hostname that encodes the tailnet
+> address**. `plex.direct` is Plex's own public wildcard DNS —
+> `<ip-with-dashes>.<cert-hash>.plex.direct` resolves to the address embedded in
+> the name, and it returns CGNAT space quite happily. So it is still plain
+> IP-based routing with no MagicDNS dependency, but it is a *hostname*, which
+> the WAF accepts, and TLS validates because the hash is the server's own
+> certificate CN (`*.<hash>.plex.direct`). Read the hash off the server with
+> `openssl s_client -connect <plex-host-ip>:32400`.
+>
+> Three things I'd have wanted to know going in:
+>
+> - **Set it via the container's `ADVERTISE_IP`, never in the Plex UI.** The
+>   image's `/etc/cont-init.d/40-plex-first-run` rewrites `customConnections`
+>   from `ADVERTISE_IP` on *every* container start, so edits made in the UI
+>   silently revert on the next restart. Keep the LAN URL in the same
+>   comma-separated list.
+> - **MagicDNS (`<host>.<tailnet>.ts.net`) belongs last, not first.** It breaks
+>   on this MacBook whenever Tailscale and PIA are up together, and a client
+>   with broken MagicDNS can't resolve `*.ts.net` at all. It earns a place as a
+>   third fallback only because it survives certificate rotation.
+> - **The `plex.direct` name is fragile in exactly one way:** re-claiming the
+>   server regenerates its certificate, which changes the hash, which leaves the
+>   hostname pointing at nothing.
+>
+> Check it took, rather than assuming — `grep -a "response from PUT
+> https://servers.plex.tv/devices/"` in `Plex Media Server.log` should show
+> `200`, not `403`.
 
 ## What's changed since (2026 update)
 
