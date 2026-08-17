@@ -234,21 +234,48 @@ Prevents CPU contention and maintains smooth gameplay.
 
 ### Access control
 
-`allowlist.json` controls who can join:
+`allowlist.json` lists who may join, and `permissions.json` grants admin rights, both keyed on a player's XUID:
 
 ```json
+// allowlist.json
 [
-  { "name": "Player1", "xuid": "..." }
+  { "ignoresPlayerLimit": false, "name": "<gamertag>", "xuid": "<xuid>" }
 ]
 ```
 
-`permissions.json` controls admin rights:
-
 ```json
-{
-  "permission": "operator"
-}
+// permissions.json
+[
+  { "permission": "operator", "xuid": "<xuid>" }
+]
 ```
+
+> ⚠️ **Correction (2026-08-17).** Written as though populating `allowlist.json`
+> were sufficient. It isn't, and on this host neither file is doing what the
+> section implied:
+>
+> - **`allow-list=false`** on both servers. The allowlist file exists and has
+>   names in it, but the server never consults it — anyone who can reach the
+>   port can join. A populated allowlist that isn't switched on looks exactly
+>   like a working one.
+> - **`online-mode=false`** on both, which is the more interesting half. That
+>   disables Xbox Live authentication, so the XUID a client presents is simply
+>   asserted, not verified. Since *both* files key on XUID, turning the
+>   allowlist on while `online-mode` stays off gives you a door with a lock
+>   whose key anyone can claim to hold — including the `operator` grant in
+>   `permissions.json`.
+>
+> Both values are set in each `server.properties`, not in `docker-compose.yml`.
+> That matters for the itzg image: it leaves already-persisted properties alone,
+> so adding `ALLOW_LIST` or `ONLINE_MODE` to compose later will *not* override
+> what's on disk. Edit the properties file, or the change will look applied and
+> do nothing.
+>
+> This is an acceptable trade on a LAN behind NAT, where reaching the port at
+> all means you're already in the house, and it saves the friction of Xbox
+> sign-in for local players. It stops being acceptable the moment either port is
+> forwarded — that's the point to turn `online-mode` on **first**, then the
+> allowlist, in that order.
 
 ### Outcome
 

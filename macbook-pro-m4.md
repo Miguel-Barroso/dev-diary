@@ -78,8 +78,8 @@ Both the MBP and the QNAP NAS have ethernet headroom that the WiFi-only home net
 
 Manual IPs on the dedicated link:
 
-- MBP USB-C-hub ethernet: `192.168.10.2`
-- QNAP NAS, Adapter 1: `192.168.10.1`
+- MBP USB-C-hub ethernet: `<mbp-direct-ip>`
+- QNAP NAS, Adapter 1: `<nas-direct-ip>`
 - Netmask `255.255.255.0`, gateway blank on both ends
 
 Direct LAN transfers (rsync, SMB browsing) ran at full ethernet speed without ever crossing the router.
@@ -385,7 +385,7 @@ Experienced extremely high latency (\~500 ms) in Discord voice calls
 between Japan (me, Shiga) and Sweden (Malmö).
 
 Even basic network tests showed abnormal behavior: - `ping 1.1.1.1` →
-\~300 ms ❌ - Local ping (`192.168.1.1`) → \~3 ms ✅
+\~300 ms ❌ - Local ping (`<router-ip>`) → \~3 ms ✅
 
 ------------------------------------------------------------------------
 
@@ -414,7 +414,7 @@ Result: - \~300 ms from first hop (10.x.x.x)
 ### 2. Verified local network
 
 ``` bash
-ping -c 6 192.168.1.1
+ping -c 6 <router-ip>
 ```
 
 Result: - \~3 ms ✅

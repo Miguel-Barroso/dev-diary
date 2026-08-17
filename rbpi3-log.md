@@ -27,7 +27,7 @@ The `c920-publisher` ffmpeg config had drifted from the documented 2.5 Mbps to *
 ### Final state (verified)
 - `mjpg-streamer.service` (new): `input_uvc.so -d /dev/video0 -r 864x480 -f 15` → `output_http.so -p 8080`. HW-JPEG passthrough, intra-only ⇒ **no pixel storms**. Focus-pinning (`focus_absolute=0` = infinity) carried over via `ExecStartPost`.
 - **CPU ~1.4% (mjpg-streamer); ~65 °C; full 1200 MHz; load <1** (was 82 °C throttling).
-- QVR source URL: `http://192.168.1.51:8080/?action=stream`.
+- QVR source URL: `http://<pi-lan-ip>:8080/?action=stream`.
 - `pi-motion-detect.service`: repointed to the HTTP stream (`start_ffmpeg` made scheme-aware — `-f mpjpeg` for http, `-rtsp_transport tcp` for rtsp). **QVR motion events still wired** (`QVR_PRO_EVENT_URL` unchanged). Its leftover `Wants=/After=c920-publisher` (which *resurrected* the dead H.264 stack on restart) was fixed to depend on `mjpg-streamer`.
 - **Removed the H.264 stack as bloat**: `c920-publisher.service` + its README, **MediaMTX** (59 MB binary + `/etc/mediamtx` + unit), the dead `snapshot-stream.service`, and all `*.bak`/scratch leftovers. Full H.264 rebuild recipe is preserved in the **2026-06-19** entry below.
 
@@ -390,7 +390,7 @@ WantedBy=timers.target
 ## Network Security Hardening
 
 Because this Pi runs mjpg-streamer’s HTTP interface, I locked it down with UFW so it is only reachable from:
-	•	Local LAN (192.168.1.0/24)
+	•	Local LAN (<lan-subnet>)
 	•	Any device on my Tailscale network (100.64.0.0/10)
 
 All other incoming traffic is denied.
@@ -398,7 +398,7 @@ All other incoming traffic is denied.
 Final ruleset:
 
 ```
-192.168.1.0/24    ALLOW IN
+<lan-subnet>    ALLOW IN
 100.64.0.0/10     ALLOW IN
 Default: deny incoming, allow outgoing
 ```
@@ -544,7 +544,7 @@ sudo cp snapshot-stream.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now snapshot-stream
 ```
-Stream URL: http://192.168.1.50:8080/stream <-- Your RBPi's IP or Tailscale
+Stream URL: http://<pi-lan-ip>:8080/stream <-- Your RBPi's IP or Tailscale
 
 Ingestors tested: VLC (desktop & mobile), QVR Pro (QNAP), web browsers
 

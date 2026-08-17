@@ -33,8 +33,8 @@
 ### 🔒 Firewall
 - UFW set to default deny.
 - Allowed:
-  - `22/tcp` from `192.168.0.0/24`
-  - `3389/tcp` from `192.168.0.0/24` and `100.64.0.0/10`
+  - `22/tcp` from `<lan-subnet>`
+  - `3389/tcp` from `<lan-subnet>` and `100.64.0.0/10`
 - Removed overly permissive rules.
 - System remains headless with secure RDP and SSH.
 
@@ -77,11 +77,11 @@ OBS Media Source stalls on low-end RTSP IP cam.
 
 * Pulled and ran AdGuard Home in Docker
 * Switched to `--network host` for simplicity and stability
-* Web UI bound to `192.168.1.19:8080`
+* Web UI bound to `<macmini-ip>:8080`
 * DNS port (53) was already taken, so initially bound AdGuard to `5353`
 * Configured firewall to only allow access to port `8080` from:
 
-  * `192.168.1.0/24` (LAN)
+  * `<lan-subnet>` (LAN)
   * `100.64.0.0/10` (Tailscale)
 * Changed ownership and permissions to fix permission warnings:
 
@@ -176,7 +176,7 @@ sudo chattr +i /etc/resolv.conf
 
 * Allowed port 53 from:
 
-  * LAN: `192.168.1.0/24`
+  * LAN: `<lan-subnet>`
   * Tailscale: `100.64.0.0/10`
 
 ### Upstream Configuration in AdGuard
@@ -196,7 +196,7 @@ sudo chattr +i /etc/resolv.conf
 * Verified via:
 
 ```bash
-dig +dnssec dnssec-failed.org @192.168.1.19
+dig +dnssec dnssec-failed.org @<macmini-ip>
 ```
 
 ---
@@ -205,7 +205,7 @@ dig +dnssec dnssec-failed.org @192.168.1.19
 
 ### DNS Enforcement
 
-* Orbi router set with `192.168.1.19` (Mac Mini) as **only** DNS server
+* Orbi router set with `<macmini-ip>` (Mac Mini) as **only** DNS server
 * All other clients blocked from upstream DNS via router firewall (port 53)
 * Ensures clients can't bypass AdGuard
 * Verified with `nslookup google.com 8.8.8.8` → timeout on clients, works on Mac Mini
@@ -317,8 +317,8 @@ Confirmed `io.elementary.appcenter` binary is gone.
 - Set **bootstrap DNS** to `1.1.1.1` for reliable resolution of the DoH hostname.
 - This ensures encrypted DNS lookups with minimal external dependencies and avoids plaintext DNS leaks.
 - Saved a copy of the updated `AdGuardHome.yaml` to the home directory for backup and version control.
-- Set 192.168.1.19 as the only DNS resolver in the Orbi Router
-- Confirmed DNSSEC with ```dig +dnssec sigfail.verteiltesysteme.net @192.168.1.19```
+- Set <macmini-ip> as the only DNS resolver in the Orbi Router
+- Confirmed DNSSEC with ```dig +dnssec sigfail.verteiltesysteme.net @<macmini-ip>```
 
 ### 📡 SmokePing Monitoring Expansion
 - Expanded monitoring targets to include local infrastructure:
@@ -349,25 +349,25 @@ title = Orbi Mesh Network Devices
 ++ RBR50
 menu = RBR50 Router
 title = RBR50 - Main Router (Ethernet, near MacMini)
-host = 192.168.1.1
+host = <router-ip>
 
 title = Engawa1 - Entrance Camera (2.4 GHz)
-host = 192.168.1.35
+host = <engawa-cam-ip>
 
 ++ Toilet1
 menu = Toilet1 - Cat Toilet
 title = Toilet1 - Cat Toilet (2.4 GHz)
-host = 192.168.1.34
+host = <toilet-cam-ip>
 
 ++ Kura1
 menu = Kura1 - Kura Camera
 title = Kura1 - Kura (2.4 GHz)
-host = 192.168.1.26
+host = <kura-cam-ip>
 
 ++ RPi3
 menu = Raspberry Pi 3
 title = Raspberry Pi 3 Camera (2.4 GHz)
-host = 192.168.1.50
+host = <pi3-lan-ip>
 ```
 
 ## 2025-07-30 – AdGuard as DHCP Server Update
@@ -385,7 +385,7 @@ Edited conf/AdGuardHome.yaml:
 2.	Assign Static IP to Mac mini
 Configured enp1s0f0 in Pop!_OS to:
 ```
-192.168.1.19/24 (255.255.255.0)
+<macmini-ip>/24 (255.255.255.0)
 ```
 3.	Point System DNS Locally
 In Pop!_OS network settings, set DNS to:
@@ -407,7 +407,7 @@ This allows the container to bind to UDP/67 for DHCP.
 
 UFW rules (scoped to enp1s0f0):
   ```
-sudo ufw allow in  on enp1s0f0 proto udp from 192.168.1.0/24 to any port 67
+sudo ufw allow in  on enp1s0f0 proto udp from <lan-subnet> to any port 67
 sudo ufw allow in  on enp1s0f0 proto udp to any port 68
 sudo ufw allow out on enp1s0f0 proto udp from any to any port 67
 sudo ufw allow out on enp1s0f0 proto udp from any to any port 68
@@ -500,13 +500,13 @@ The cat-café feed (Pi 4 + Logitech C525) was served as **MJPEG** over HTTP by `
 
 - OBS can't ingest the raw MJPEG Media Source without silently stalling — hence the screen-capture hack.
 - `autovlc.sh` had drifted to `--run-time=30 … vlc://quit`, so the captured VLC window relaunched every ~35 s — a periodic black-frame hiccup baked into the broadcast.
-- Two dead background loops were still running: `catcam_rtmp.service` was pulling `rtsp://192.168.1.41:554/11` (the Pi serves no RTSP → `Connection refused` in a tight restart loop), and a stray VLC was aimed at `rtsp://192.168.68.104` (a subnet this box can't even route to).
+- Two dead background loops were still running: `catcam_rtmp.service` was pulling `rtsp://<pi4-lan-ip>:554/11` (the Pi serves no RTSP → `Connection refused` in a tight restart loop), and a stray VLC was aimed at `rtsp://<foreign-subnet-ip>` (a subnet this box can't even route to).
 - MJPEG at 720p30 is ~15–40 Mbps, which is why the Pi was stuck on Ethernet.
 
 ### New architecture
 ```
 Pi 4 (C525) → ffmpeg h264_v4l2m2m (720p30, ~3–4 Mbps) → RTMP push over 5 GHz WiFi
-     → rtmp://192.168.1.19/live/catcam      (this box's nginx-RTMP)
+     → rtmp://<macmini-ip>/live/catcam      (this box's nginx-RTMP)
           → OBS Media Source rtmp://localhost/live/catcam → x264 2500k → YouTube
 ```
 The Pi hardware-encodes H.264 itself (the C525 has no onboard H.264 — only YUYV/MJPG), which drops the link to ~3 Mbps so it rides 5 GHz WiFi with no bufferbloat. nginx-RTMP decouples OBS from the WiFi: OBS reads a rock-solid `localhost` source, so brief WiFi hiccups never reach it. No screen capture, no VLC, no X dependency.
@@ -514,14 +514,14 @@ The Pi hardware-encodes H.264 itself (the C525 has no onboard H.264 — only YUY
 ### Changes on this box
 - **UFW** — nginx-RTMP was only ever used via localhost, so 1935 was LAN-blocked (the Pi's push timed out). Opened it to the LAN, scoped like the other rules:
   ```bash
-  sudo ufw allow in on enp1s0f0 proto tcp from 192.168.1.0/24 to any port 1935
+  sudo ufw allow in on enp1s0f0 proto tcp from <lan-subnet> to any port 1935
   ```
 - **OBS** (scene *Bob's Family Fanclub*) — showed the existing **CatCam RTMP Stream** source (`rtmp://localhost/live/catcam`), hid **Window Capture (Xcomposite)**. The *Date and Time* overlay stays on top.
 - **Retired the cruft**:
   ```bash
   sudo systemctl disable --now catcam_rtmp.service   # dead RTSP watchdog
   sudo systemctl disable --now autovlc.service        # cvlc on the retired MJPEG feed
-  sudo pkill -x vlc                                    # stray 192.168.68.104 window
+  sudo pkill -x vlc                                    # stray <foreign-subnet-ip> window
   ```
 
 ### Gotcha — OBS source stuck black
