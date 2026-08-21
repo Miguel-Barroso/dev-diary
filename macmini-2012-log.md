@@ -724,3 +724,76 @@ Worth knowing before you go looking, because it cost me a detour. `dhcp.dhcpv4.s
 every pinned address in the house looks unmanaged if you read the config file. The reservations are
 the **expiry-less entries in `work/data/leases.json`**. Nothing is statically configured on the hosts
 themselves; they're all DHCP clients.
+
+## 2026-08-21 — SmokePing's alert had nowhere to send mail, and postfix had been dead for weeks without anyone noticing
+
+Chasing the Pi 3's ping flapping (`rbpi3-log.md`) led to actually reading the SmokePing config that was
+supposed to be alerting on it — which turned out to have never been finished.
+
+### The config was still the Debian package's example
+
+`config.d/General` had `owner = Peter Random`, `contact = some@address.nowhere`,
+`mailhost = my.mail.host`, `cgiurl = http://some.url/smokeping.cgi` — the literal placeholder values the
+package ships with, never touched. `cgiurl` was easy to fix for real: this box serves the CGI through
+nginx on `:8081`, so it's now `http://<macmini-ip>:8081/smokeping.cgi`.
+
+The one alert rule, `someloss`, had a pattern that didn't match its own comment:
+
+```
+pattern = >0%,*12*,>0%,*12*,>0%
+comment = loss 3 times in a row
+```
+
+`*12*` means 12 wildcard steps — at this box's 300 s polling interval, that's loss, then roughly an
+hour of anything, then loss again, then another hour, then loss a third time. That's "loss recurring
+across a couple of hours," not "three in a row," and it's also the stock example pattern straight out
+of SmokePing's own docs, left in place with the comment carried over unchanged. Changed it to
+`>0%,>0%,>0%` — three consecutive polling steps, 15 minutes, which would actually have caught the Pi
+flapping earlier today. Also found `config.d/Targets.old`, a pre-rename copy of the targets file that
+isn't `@include`d anywhere — dead, not dangerous, archived off the box rather than deleted outright.
+
+### Wiring up real delivery surfaced something worse
+
+Fixing the placeholders was step one; step two was making the alert mail actually send, through
+Resend's transactional SMTP relay. Postfix was already installed on this box — just never enabled — so
+the plan was to configure it as a relay-only satellite instead of adding new software: SASL auth to
+`smtp.resend.com:465`, `smtp_tls_wrappermode` on since 465 is implicit TLS rather than STARTTLS, and
+`inet_interfaces = loopback-only` so it never listens on the LAN. `libsasl2-modules` had to be installed
+separately — the `-db` variant already on the box doesn't carry the PLAIN mechanism Resend needs.
+
+`postmap` refused with `fatal: bad string length 0 < 1: setgid_group =`, which had nothing to do with
+anything I'd just written. `main.cf` had **eight** required parameters sitting blank:
+
+```
+setgid_group, sendmail_path, newaliases_path, mailq_path,
+html_directory, manpage_directory, sample_directory, readme_directory
+```
+
+`mail.log` had been recording the fallout every single day since at least Aug 16 —
+`fatal: open /etc/postfix/main.cf: No such file or directory`, then the same blank-parameter fatals
+once the file reappeared — off this box's own daily cron mail, with nothing surfacing it because
+nothing was reading that log. Restored all eight to Postfix's own compiled-in defaults
+(`postconf -d <param>` for each), and `postfix check` went from silent-but-broken to clean:
+
+```bash
+sudo postconf -e 'setgid_group = postdrop' 'sendmail_path = /usr/sbin/sendmail' \
+  'newaliases_path = /usr/bin/newaliases' 'mailq_path = /usr/bin/mailq' \
+  'html_directory = /usr/share/doc/postfix/html' 'manpage_directory = /usr/share/man' \
+  'sample_directory = /etc/postfix' 'readme_directory = /usr/share/doc/postfix'
+```
+
+### The gotcha: the relay checks the envelope, not the header
+
+First test bounced from Resend with ``550 Invalid `from` field``, which looked like an auth problem and
+wasn't. I'd sent it as root without `-f`, and Postfix's `sendmail` derives the envelope sender from the
+invoking Unix account whenever `-f` is absent — the `From:` header in the message body is cosmetic, not
+what the relay checks. Root with no `-f` becomes `root@macmini`, which isn't a domain Resend will
+accept mail from. Confirmed the same thing running as the actual `smokeping` service account: no `-f`,
+same bounce shape, `smokeping@macmini` this time. What kept this from being a second real bug: SmokePing's
+own alert code (`Smokeping.pm`) already calls `sendmail -f $from`, using the Alerts `from` address
+explicitly — so the live alert path was never going to hit this. Worth knowing anyway for anything else
+on this box that shells out to `sendmail` without thinking about the envelope.
+
+Verified with `-f` set correctly, run as the `smokeping` user: `status=sent`, with a Resend message ID
+back in `mail.log`. Postfix is enabled, not just started, so this survives a reboot — and loss alerts
+now have somewhere real to go.

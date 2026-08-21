@@ -14,10 +14,10 @@ Self-taught developer notes from a decade of running things on my own hardware �
 
 ### Self-hosted infrastructure
 - [`qnapbox66.md`](qnapbox66.md) — Vaultwarden on a QNAP NAS with Caddy reverse proxy, Cloudflare DNS-01 certificates, the hardening pass that came after I caught myself doing something dumb with secrets, and key-only SSH on a box where `PermitRootLogin no` would lock you out
-- [`macmini-2012-log.md`](macmini-2012-log.md) — 2012 Mac Mini repurposed as a 24/7 cat-café livestream host and network-wide AdGuard DNS server, with OBS hardware encoding, AdGuard DHCP takeover, what it takes to put the household resolver behind a deny-by-default policy without taking the house offline, and closing an RTMP ingest that was open by default on both play and publish
+- [`macmini-2012-log.md`](macmini-2012-log.md) — 2012 Mac Mini repurposed as a 24/7 cat-café livestream host and network-wide AdGuard DNS server, with OBS hardware encoding, AdGuard DHCP takeover, what it takes to put the household resolver behind a deny-by-default policy without taking the house offline, closing an RTMP ingest that was open by default on both play and publish, and finding postfix had been silently dead for weeks while wiring SmokePing's alert mail through a real relay
 
 ### Raspberry Pi
-- [`rbpi3-log.md`](rbpi3-log.md) — Pi 3 surveillance camera with a custom systemd-driven recovery script that revives the Broadcom WiFi chip when it hangs, and a tidy-up that turned into a lesson about mistaking leftover config for a working setup
+- [`rbpi3-log.md`](rbpi3-log.md) — Pi 3 surveillance camera with a custom systemd-driven recovery script that revives the Broadcom WiFi chip when it hangs, a tidy-up that turned into a lesson about mistaking leftover config for a working setup, and why a monitoring tool and a live stream can disagree about whether the box is up and both be right
 - [`rbpi4-catcam.md`](rbpi4-catcam.md) — Pi 4 with a USB webcam for a public cat livestream: hardware H.264 (`h264_v4l2m2m`) pushed as RTMP over 5 GHz WiFi into OBS, replacing the old MJPEG + XComposite screen-capture hack
 - [`rbpi4-cctv.md`](rbpi4-cctv.md) — migrating mjpg-streamer from Pi 3 to Pi 4, plus an FFmpeg-to-RTMP relay path
 

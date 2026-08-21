@@ -726,3 +726,37 @@ Group-read for the service account is what it needs.
 Which generalises: for a service whose real work is done by a child process, **verify by the child,
 not by the unit.** Here that means checking there's an `ffmpeg` under the main PID, and glancing at
 `NRestarts`. `active` on its own tells you almost nothing.
+
+## 2026-08-21 — SmokePing said it was down; the stream said otherwise, and both were right
+
+SmokePing had `<pi-lan-ip>` flagged as not answering pings, but QVR Pro was still pulling a live feed
+off the same address — the kind of contradiction that usually means the monitoring is wrong, not the
+box. It wasn't the monitoring.
+
+First thing to establish, and easy to get backwards: `ssh raspberrypi3` resolves to the Tailscale
+address, not the LAN one, so a working shell says nothing about whether the LAN IP is actually
+reachable. A plain ping from a machine on the same subnet, run right then, came back clean. So it
+wasn't permanently down either. SmokePing showing loss, a live TCP stream unaffected, and a working
+ping moments later — that combination is the signature of something intermittent enough to duck a spot
+check, not a real outage.
+
+`dmesg` had the answer, and it's the same signature already in this log:
+`brcmf_proto_bcdc_query_dcmd: brcmf_proto_bcdc_msg failed w/status -110`, the Broadcom firmware wedge.
+What's different this time is the rate — roughly hourly through the morning, climbing to seven separate
+wedges in under twenty minutes by the time I looked. Signal strength was fine (-47 dBm); the
+retry-discard counter (7326, from `/proc/net/wireless`) wasn't, so there's likely some RF contention
+riding along with the firmware issue rather than replacing it.
+
+`wifi-watchdog.timer` was doing exactly what it's built to do: pinging the gateway every 60 s, catching
+the wedge, reconnecting via NetworkManager, and clearing the failure counter before the next cycle —
+which is also why it never crossed into the reload/reboot escalation tiers even while flapping hard.
+That's the whole discrepancy in one sentence: a single missed watchdog cycle is enough for SmokePing's
+`fping` probe to log loss, and nowhere near enough to interrupt a buffered RTMP stream. Both readings
+were correct; they were just measuring different tolerances for the same blip.
+
+Nothing to fix here — the watchdog is doing its job — but worth watching. If the wedge frequency keeps
+climbing instead of settling back to its baseline, that's the point to stop trusting the watchdog to
+keep absorbing it.
+
+(Following this thread into the SmokePing config it was tripping turned up a second, unrelated problem
+on the box that hosts it — see `macmini-2012-log.md`.)
