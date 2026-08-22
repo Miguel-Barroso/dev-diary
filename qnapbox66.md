@@ -498,3 +498,200 @@ her Time Machine backups run to a share on this box. **A blocked backup fails qu
 broken**, and you find out about it on the day you need it. That's a worse outcome than the port being
 reachable from a laptop I already trust, so it's granted. Least-privilege is a default, not a rule to
 follow off a cliff.
+
+---
+
+# The reboot that left no crash to find (2026-08-22)
+
+The NAS dropped off the network at about 11:24 and was back by 11:34. Nothing else in the house so
+much as flickered. I went in certain of one thing: **it can't have been power**, because the box sits
+behind an EcoFlow Delta 2 and a battery that big doesn't just blink.
+
+That premise was wrong, and the way it was wrong is the useful part of this entry.
+
+## Three places to look, and the one that mattered
+
+QTS says plainly what it thinks happened:
+
+```
+2026-08-22 11:29:43  [Power] The system was not shutdown properly last time.
+2026-08-22 11:26:54  first post-boot event (RAID resync)
+```
+
+So: unclean. That narrows it to "crashed" or "lost power", and those two want very different fixes, so
+the whole job is telling them apart.
+
+The kernel log is persisted to flash at `/mnt/HDA_ROOT/.logs/kmsg`, and because it only rotates on
+size, the live file still reached back past the event:
+
+```
+2026-08-22 02:03:37  [975649.875824] EXT4-fs (device dm-11): ext4trim finish
+2026-08-22 11:33:04  [    0.000000] Linux version 5.10.60-qnap ...
+```
+
+Nine hours of silence, then the boot banner. No panic, no oops, no OOM kill, no soft lockup, no I/O
+error, no NIC reset. The kernel didn't complain on the way out. It stopped mid-sentence.
+
+Silence is suggestive but not proof — a box that hard-hangs also goes quiet, and rsyslog can't flush
+what it never got. The thing that actually decided it was **the crash buffer being empty**.
+
+## Why an empty log is the loudest evidence in the room
+
+QTS boots with ramoops configured, a 2 MB region pinned at a fixed physical address:
+
+```
+ramoops.mem_address=0x8000000   ramoops: using 0x200000@0x8000000
+pstore: Registered ramoops as persistent store backend
+```
+
+The kernel console is mirrored into that RAM as it runs. On the next boot `/etc/init.d/init_check.sh`
+mounts pstore, and if `console-ramoops-0` is there it rotates the saved copies and writes a new one:
+
+```sh
+/bin/mount -t pstore - /sys/fs/pstore
+if [ -f /sys/fs/pstore/console-ramoops-0 ]; then
+    ...rotate pstore_1 -> pstore_2 -> pstore_3...
+    /bin/cp /sys/fs/pstore/console-ramoops-0 /mnt/HDA_ROOT/.logs/$pslog1
+fi
+```
+
+Two things follow, and I only trusted the conclusion once I'd checked both.
+
+**One: this fires on every boot, not just bad ones.** The three files on disk are dated 07-25 and
+08-10 ×2, and one of those lines up with a perfectly ordinary reboot I did myself. So a saved dump is
+the *normal* outcome, which makes its absence meaningful rather than unremarkable.
+
+**Two: it wasn't skipped.** The branch is gated on a loop that waits up to three seconds for
+`/mnt/HDA_ROOT/.logs` to exist. That's flash, mounted early, always there — so the guard passes and
+the extraction genuinely ran and genuinely found nothing. Worth reading the guard before leaning on a
+negative result; "the log is missing" and "the thing that writes the log never ran" look identical
+from the outside.
+
+And that's the answer. **ramoops survives a warm reset** — that is the entire point of it. A kernel
+panic, a watchdog reset, a `reboot`: all of those leave the DRAM contents intact and the record turns
+up on the next boot. What ramoops does *not* survive is the RAM losing power.
+
+The buffer was empty. The RAM went dark. That isn't a crash, it's a power event.
+
+## What that let me rule out
+
+| Suspect | Evidence against |
+|---|---|
+| Thermal | CPU 54 °C, system 43 °C, disks 47–49 °C, fan 2471 RPM — all unremarkable |
+| Disk / RAID | `md1` clean `[UUUU]`, resync done by 11:39; all four disks 0 reallocated / 0 pending / 0 uncorrectable |
+| UPS-triggered shutdown | UPS integration is `Enable = FALSE`, `AC Power = OK` — and a Delta 2 has no UPS data port to signal over anyway |
+| Scheduled or graceful reboot | No `shutdown.log` entry for the day at all |
+| Software crash | Empty ramoops, silent kernel log, silent event log |
+| House-wide outage | Both Pis had multi-day uptimes and never blinked |
+
+It came back on its own because `Power_Recovery_Mode = 2` — the box is set to resume its previous
+state rather than stay off. Which is why I'd never had to think about any of this before: the failure
+mode and the recovery cancel out, and all you notice is a ten-minute hole.
+
+## It's been getting worse for two years
+
+`[Power] The system was not shutdown properly last time.` is greppable, and the event log goes back to
+2021. Counting by year:
+
+| Year | Unclean shutdowns |
+|---|---|
+| 2021 | 2 |
+| 2022 | 2 |
+| 2023 | 1 |
+| 2024 | 1 |
+| 2025 | 4 |
+| 2026 | **7** (to August) |
+
+The times of day are scattered across the whole clock — 05:39, 10:15, 13:02, 16:10, 20:57 — so it
+isn't tracking a schedule, a backup window, or an afternoon heat soak. And 2026-02-16 produced three
+in one evening, which is the shape of either a supply failing under stress or a grid throwing repeated
+transfer events.
+
+I'd seen every one of these as a one-off. Each was individually forgettable; the trend is not. **The
+log had been telling me this for a year and I'd never once asked it the aggregate question.**
+
+## Reconciling it with the battery
+
+So how does a box on a 1 kWh battery lose power while nothing else does?
+
+Because a Delta 2 is not an online UPS. It's pass-through with a transfer to battery measured in
+milliseconds, and during that gap every device is running on whatever its own power supply can hold
+up. Most things ride it out invisibly. Something with a decade-old supply and tired electrolytics may
+not — and the hold-up time gets shorter as the capacitors age, which fits an accelerating failure rate
+better than anything else I can point at.
+
+Both halves of the contradiction are true at once: the battery did take over, *and* the NAS lost
+power. It just lost it for the few milliseconds before the battery arrived.
+
+That's the reframe worth keeping. **"It's on a UPS" is not the same claim as "it cannot lose power."**
+I had been treating the first as if it entailed the second, and that assumption is exactly what stopped
+me looking at this properly the previous six times.
+
+Still open, and honestly labelled as such: I have not yet confirmed a grid event at 11:24. The Delta 2
+has no shell and no local login, so that correlation has to come from EcoFlow's own telemetry — a cloud
+API, which means the logger can live on any always-on box rather than anything wired to the battery.
+The Mac Mini gets the job. Until that lands, "brief sag on transfer" is the best-supported story and
+not a proven one.
+
+With one caveat I want on the record before I lean on it: a transfer measured in milliseconds may
+never appear in that telemetry at all. The battery reports state periodically, so the logger will catch
+a *sustained* outage cleanly and may be entirely blind to the sub-second sag that is the leading
+hypothesis. **A quiet log will not be evidence of innocence**, and if I forget that I'll misread the
+next one badly. The competing explanation — a failing adapter or a marginal DC jack, with no grid event at all —
+predicts exactly the same evidence and is fixed the same cheap way, which is why the power brick gets
+replaced regardless.
+
+## Two things I found while I was in there
+
+**Bay 4 is the only drive with a dirty link record.** Mapping device nodes to physical bays is worth
+doing explicitly, because they do not come out in order:
+
+```
+Port 1 -> /dev/sdb    Port 2 -> /dev/sda
+Port 3 -> /dev/sdc    Port 4 -> /dev/sdd
+```
+
+`sdd` — **bay 4** — carries `UDMA_CRC_Error_Count = 11` and `Command_Timeout = 11`, worst normalized
+value down to 094. The other three are clean zeros. CRC errors are link-layer, which usually means
+cable or seating rather than platter, and its media stats are spotless. Not related to the reboot, but
+it's the one drive to reseat next time the lid is off. It's also the odd one out by model — an
+`ST8000NT001` where the others are `ST8000VN004` — so it went in as a replacement at some point.
+
+**The encryption is costing more than it's protecting.** Load average sits near 10 while the CPU is
+28% idle, which is the signature of threads blocked rather than busy — and the processes in `D` state
+are `dmcrypt_write` and a `dm` kworker. The volume is encrypted (`/share/CE_CACHEDEV1_DATA`,
+`/dev/mapper/ce_cachedev1`, `aes-cbc-plain`) and this box's J1900 has **no AES-NI** — I checked the
+flag rather than assuming it. Every write goes through software AES on a 2014 Celeron.
+
+The part that changes the calculus is where the key lives:
+
+```
+/etc/config/.externalkey/<uuid>.key
+```
+
+`/etc/config` is a symlink into flash, so the key is saved on the NAS and the volume unlocks itself at
+boot. That's not a misconfiguration — it's the only way an unattended box comes back from a 03:00
+power blip with its shares intact, and this morning it's exactly what got everything running again by
+11:34 with nobody at the console.
+
+But it does bound what the encryption is worth. **A key stored on the machine protects the drives, not
+the machine.** Pull a disk out of this box and it's noise. Carry the whole box out of the house and it
+unlocks itself on the new desk. The threat it defends against is bare-drive disposal or a single-disk
+theft; it does nothing about the NAS walking. I'd been carrying it in my head as "the backups are
+encrypted", full stop, which is a stronger claim than the setup supports.
+
+Which leaves a real trade to make rather than an obvious fix: permanent crypto tax on every QVR Pro
+write, in exchange for protection against one fairly narrow scenario. Worth noting QTS has no in-place
+decrypt — encryption is chosen when the volume is created and the only way out is destroy and rebuild,
+which with 9 TB on a 12.7 TB volume is a long restore. **Not a job to run on a box that browns out
+every few weeks.** Fix the power first; that ordering isn't optional.
+
+## What I'd tell myself
+
+- A missing crash dump is a finding, not a dead end — but only after you've checked that the thing
+  which writes it actually ran.
+- Warm reset versus cold reset is a question DRAM can answer, and on QTS it already has.
+- Grep the event log for the aggregate before diagnosing the instance. Seven this year reads very
+  differently from one this morning, and it's the same log either way.
+- "It's on a battery" is a claim about *outages*. It says nothing about *transfers*, and the gap
+  between those two words is where this whole thing lived.
