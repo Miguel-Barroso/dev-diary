@@ -695,3 +695,231 @@ every few weeks.** Fix the power first; that ordering isn't optional.
   differently from one this morning, and it's the same log either way.
 - "It's on a battery" is a claim about *outages*. It says nothing about *transfers*, and the gap
   between those two words is where this whole thing lived.
+
+---
+
+# A loop with only one cable in it, and a lease pinned to a dead adapter (2026-08-23)
+
+I plugged an Orbi satellite into the NAS and the house network started coming apart. QuLog filled with
+gateway reconfigurations, Adapter 2 and Adapter 3 flapping up and down, and the VPN client tearing
+down and redialling in a loop. The cabling I'd done looked like this, and looked fine:
+
+```
+RBR50 router ──▶ QNAP Adapter 1
+QNAP Adapter 3 ──▶ Sat1
+```
+
+A straight line. Two cables. I spent a while insisting to myself that a straight line cannot be a
+loop, which is true, and which is also why it took me so long to see it.
+
+## The second leg wasn't a cable
+
+The QNAP runs its four NICs as a QTS **Virtual Switch**, which underneath is a plain Linux bridge —
+not Open vSwitch, `ovs-vsctl` isn't even installed. All four adapters sit in one flat L2 domain:
+
+```
+bridge name   bridge id           STP enabled   interfaces
+qvs0          8000.00089b:xx:xx:9d   no         eth0 eth1 eth2 eth4
+```
+
+`STP enabled: no`. Four ports, one broadcast domain, no loop prevention. That's the loaded gun; the
+satellite was the trigger.
+
+Sat1 is an RBR50 — a *router* pressed into service as a satellite — and an Orbi satellite does not
+choose one backhaul and commit. It brings up Ethernet and it keeps its radio associated to the router
+while it works out which one it prefers. So the actual topology, for as long as that decision took,
+was:
+
+```
+RBR50 ──cable──▶ eth0 ──qvs0 bridge──▶ eth2 ──cable──▶ Sat1 ──radio──▶ RBR50
+```
+
+Three legs, and the one that closes the ring is made of air. It never appears in any cable trace,
+which is exactly why my "it's a straight line" reasoning felt so solid and was so wrong. The bridge
+was doing precisely what a bridge does — forwarding frames between two ports — and those two ports
+happened to be two ends of the same network.
+
+The kernel said so in as many words, 100 times:
+
+```
+[73973.400163] qvs0: received packet on eth0 with own address as source address
+               (addr:00:08:9b:xx:xx:9d, vlan:0)
+```
+
+That message is the bridge receiving a frame it originally sent. There is no innocent reading of it.
+
+## The log had already told me it was over
+
+Here is the part I got wrong, and it's a more useful mistake than the topology one.
+
+I read the QuLog screenshot as an emergency in progress and started planning an urgent cable pull. It
+wasn't in progress. The whole thing was a **transient**, confined to the window in which Sat1 was
+making up its mind:
+
+| Time | Event |
+|---|---|
+| ~11:50 | Sat1 cabled to Adapter 3 |
+| 11:54:07 | First loop burst (~5 s) |
+| 12:56–12:58 | Link flapping on eth1/eth2 — 39 transitions |
+| 13:03:02–13:03:07 | Second loop burst, then silence |
+| 17:43 | I take the screenshot |
+
+Five hours of quiet before I even looked. And the evidence was *in the screenshot* — its newest entry
+was timestamped 13:02, taken at 17:43. Four hours and forty-one minutes of nothing, sitting right
+there in the image I was using as proof of an ongoing fault. I'd looked straight past it because I was
+reading the log for *what it said* and not for *when it stopped saying it*.
+
+A log's last timestamp is data. If the newest line is hours old, the thing is not happening now, and
+that changes the fix from "pull the cable this second" to "understand it, then do it properly."
+
+## Reading the direction of a loop out of the counters
+
+Before the rewire, `ethtool -S` on each NIC was unusually eloquent:
+
+| NIC | Adapter | rx_broadcast | tx_broadcast |
+|---|---|---|---|
+| eth0 | 1 (router) | 274,653 | 31,197 |
+| eth1 | 2 (homeplug) | 15,788 | 289,607 |
+| eth2 | 3 (Sat1) | 1,432 | 250,381 |
+
+Broadcast comes *in* on eth0 and goes *out* everywhere else, which is just a bridge flooding normally.
+The useful asymmetry is eth2: 1,432 received against 250,381 sent. Sat1 was being shouted at and
+barely answering — consistent with a satellite whose Ethernet side was up but which wasn't yet using
+it as its path home.
+
+Two things worth writing down about `brctl showmacs`, because both cost me time:
+
+**Bridge port numbers are not adapter numbers.** They're assigned in the order interfaces joined the
+bridge, and on this box they land scrambled:
+
+```
+eth0 (Adapter 1) -> port 1      eth1 (Adapter 2) -> port 4
+eth2 (Adapter 3) -> port 2      eth4 (Adapter 4) -> port 3
+```
+
+I read "port 2" as "Adapter 2" for a good few minutes and drew confident conclusions from it.
+
+**A dead link still holds a bridge port.** Adapter 2 had a HomePlug adapter in it that I'd stopped
+using — high jitter, periodic drops, which I put down to the wiring in an old kominka. A 20-second
+counter delta settled whether it mattered:
+
+```
+eth0  +36,982 packets      eth2  +39,909 packets      eth1  +2 packets
+```
+
+Two packets. Its powerline partner was gone and it had nothing to bridge to. Not a suspect — but still
+a full member of `qvs0`, which becomes important further down.
+
+## STP was the reflex, and it was the wrong fix
+
+My first instinct was to switch on Spanning Tree in the Virtual Switch UI, which is the textbook answer
+to a bridging loop and which I talked myself into and back out of twice.
+
+Against it: STP can only ever fix this by blocking a port, and the only candidates were the uplink to
+the router or the cable to Sat1 — both of which I actually want forwarding. That reasoning is correct
+for a *permanent* loop.
+
+For a *transient* one it's backwards. Blocking eth2 during backhaul negotiation is the right call, and
+STP re-converges on its own once the radio drops out. So STP would have worked here.
+
+It's still not what I did, because it treats the symptom. STP is what you turn on when you have a loop
+you can't eliminate. I could eliminate this one. The costs are real too — roughly 30 seconds of
+listening and learning on every link event before a port forwards, on a box that already reboots more
+than I'd like — and consumer mesh gear is not reliable about passing BPDUs through, so an STP domain
+that stops at the Orbi is a false sense of safety.
+
+The rule I'd rather hold: **STP is a seatbelt, not a topology.** Fix the topology.
+
+## What I changed
+
+The one arrangement in this house with a clean track record is Sat2, which has been wired straight to
+the router the whole time without a single incident. So: both satellites onto the router, everything
+else behind a spare Linksys LGS108, and the NAS reduced to a single cable so its bridge becomes a
+**leaf** and can't be a transit path for anything.
+
+```
+fiber modem ──▶ RBR50 WAN (port 1)
+RBR50 port 2 ──▶ Sat1 ethernet backhaul
+RBR50 port 3 ──▶ Sat2 ethernet backhaul
+RBR50 port 4 ──▶ LGS108 port 1
+                 LGS108 port 2 ──▶ QNAP Adapter 1   (only cable in the NAS)
+                 LGS108 port 3 ──▶ Mac Mini 2012    (AdGuard DNS + DHCP)
+                 LGS108 port 8 ──▶ HomePlug         (single adapter, no partner)
+```
+
+Cables moved at 18:33; by 18:36 eth1 and eth2 were down and stayed down. The forwarding table is the
+proof it worked — every remote address is now learned on the single uplink:
+
+```
+port 1: 25 macs      port 2: 1 mac (local)      port 3: 1 mac (local)
+```
+
+Sat1's address moved from port 2 to port 1, meaning the NAS now reaches it via the switch and the
+router rather than down a private cable, and its two clients followed it across. Loop message count
+frozen at 100 with none since. eth0 clean: `rx_crc_errors: 0`, `rx_missed_errors: 0`.
+
+The HomePlug is the one thing left that could re-create this, and it's worth being explicit about why.
+A powerline adapter is a transparent L2 bridge — pair two and their Ethernet ports are the same
+broadcast domain, with the mains as an invisible cable between them. On the switch with no partner
+it's inert. It becomes a loop the moment its partner's Ethernet side touches the LAN again: a
+satellite's spare LAN port, another switch, anything. Identical shape to the Orbi loop, over copper
+instead of air. And HomePlug adapters **auto-pair on the default network key**, so that can happen
+because somebody plugged a spare into a wall socket, with no decision made by anyone.
+
+## The lease was pinned to the adapter I'd stopped using
+
+The near-miss. Before moving anything I checked how `qvs0` gets its address, expecting static:
+
+```
+option dhcp-client-identifier 1:0:8:9b:xx:xx:9d
+option dhcp-server-identifier <macmini-ip>
+fixed-address <qnap-lan-ip>
+```
+
+DHCP, from the Mac Mini, keyed to `…9d`. That's **eth1's MAC — Adapter 2, the port with the dead
+HomePlug in it.** A Linux bridge takes the lowest MAC among its members, eth1 sorts below eth0's
+`…9c`, and so the NAS's entire network identity had quietly attached itself to the one adapter I'd
+written off as useless.
+
+My plan had been to strip the Virtual Switch back to Adapter 1 only. That would have dropped the
+bridge MAC to `…9c`, changed the DHCP client identifier, and presented AdGuard with what looks like a
+brand new device — moving the NAS off its address and taking every hardcoded reference with it.
+
+In the end I moved cables and left the Virtual Switch membership alone, so the address never moved.
+Worth being clear that this was luck rather than judgement: a bridge keeps a member's MAC even with
+the carrier down, so `…9d` survived a dead port.
+
+That leaves the config in a state I should name honestly. Adapters 2, 3 and 4 are **still bridge
+members** with STP still off. Physically the box is a leaf and cannot loop. But plug a cable into any
+of those three ports and it silently rejoins `qvs0`, and if that cable has another way back to the
+LAN, this entry happens again. The safety is in the cabling, not the configuration. Cleaning it up
+means staging a reservation for `…9c` on the Mac Mini first, and that has to happen *before* the
+membership change, not after.
+
+## What the fix didn't fix
+
+Load average before the rewire was 10.71. An hour after, on a demonstrably loop-free network: 10.46.
+
+The loop was never what was pinning this box. That's `mongod`, QVR Pro's motion-detection workers, and
+a log service grinding through 65,619 entries against a QuLog destination volume that was never
+configured. All of which I'd have happily filed under "must have been the network" if the number had
+moved, and the number didn't move.
+
+Also worth noting the VPN, which produced the loudest and most alarming lines in the original log,
+never had a problem at all. The bridge loop caused the gateway to be re-elected, re-election tore down
+the default route, and the tunnel dropped because its next hop vanished. It was the most visible
+symptom and the furthest thing from the cause.
+
+## What I'd tell myself
+
+- A loop needs two paths, not two cables. Radio backhaul, powerline, a second SSID, anything
+  transparent at L2 — if you're only auditing things you can physically trace, you're auditing the
+  wrong set.
+- Check when a log *stopped* before reacting to what it says. Newest timestamp versus wall clock is
+  one subtraction and it reframes the entire job.
+- STP is what you enable when you can't remove the redundant path. If you can remove it, remove it.
+- Bridge port numbers are assignment order, not adapter numbers. Read the mapping, don't infer it.
+- Before changing bridge membership, find out which member's MAC the bridge is wearing. On a DHCP box
+  that MAC is your identity on the network, and it may well belong to a port you think is dead.
+- When a fix lands, check the metric you were blaming *before* it. A number that doesn't move is
+  telling you that you just fixed a different problem than the one you noticed.
