@@ -900,10 +900,17 @@ membership change, not after.
 
 Load average before the rewire was 10.71. An hour after, on a demonstrably loop-free network: 10.46.
 
-The loop was never what was pinning this box. That's `mongod`, QVR Pro's motion-detection workers, and
-a log service grinding through 65,619 entries against a QuLog destination volume that was never
-configured. All of which I'd have happily filed under "must have been the network" if the number had
-moved, and the number didn't move.
+The loop was never what was pinning this box. It's QVR Pro — the motion-detection workers, and a
+`mongod` sitting on 2.2 GB of surveillance log database. I'd have happily filed all of it under "must
+have been the network" if the number had moved, and the number didn't move.
+
+I first wrote that up as QuLog Center churning against an unconfigured destination volume, which was
+wrong and is worth correcting rather than quietly editing out. **There are two things on this box
+called "the log service" and I picked the wrong one.** The hot `mongod` declares `dbPath: "/storage/
+mongodb/"`, which reads like a system path and isn't — its open file descriptors resolve to
+`QVRProDB/QVRProDB/Log/mongodb` on the data volume. QuLog's own database is MariaDB, 1.6 MB, on
+flash, and it isn't grinding through anything at all. Resolving a config path through `/proc/<pid>/fd`
+rather than trusting what the config file says is what separated them.
 
 Also worth noting the VPN, which produced the loudest and most alarming lines in the original log,
 never had a problem at all. The bridge loop caused the gateway to be re-elected, re-election tore down
