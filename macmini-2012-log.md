@@ -797,3 +797,137 @@ on this box that shells out to `sendmail` without thinking about the envelope.
 Verified with `-f` set correctly, run as the `smokeping` user: `status=sent`, with a Resend message ID
 back in `mail.log`. Postfix is enabled, not just started, so this survives a reboot — and loss alerts
 now have somewhere real to go.
+
+## 2026-08-23 — Two days spent monitoring an address I'd retired, and the cron mail that bounced in silence
+
+Started as "why does SmokePing say the Pi 3 is dead when it is plainly streaming". Nothing to do with
+the Pi 3 (`rbpi3-log.md`); all of it lives on this box.
+
+### Editing the config is not what makes SmokePing read it
+
+`config.d/Targets` said `host = <pi3-eth-ip>`, eth0's MAC in the remark. `fping` from this box to that
+address: 0% loss, 1.78 ms avg. Config correct, network correct, graph flat dead.
+
+The daemon had last started **2026-08-21 18:23:59**. `Targets` had an mtime of **2026-08-23 14:03**.
+SmokePing parses its config once, at startup, and I had edited the file without telling it.
+
+Rather than guess what it held, I read it off the running process. The `FPing` probe batches every
+target into one `fping` per cycle, so the argument list *is* the loaded config:
+
+```bash
+pgrep -x -a fping    # caught mid-poll — targets are argv
+```
+
+It listed `.50`, the Pi's wlan0 address that I had soft-blocked earlier the same day, and no `.51`
+anywhere. A `tcpdump` across one full 300 s cycle agreed: 20 echo requests per target, `.51` not among
+them. SmokePing was faithfully monitoring an interface I had deliberately retired, and correctly
+reporting it dead.
+
+`systemctl reload smokeping` fixed it in one command. What kept it invisible for two days is that
+`ActiveEnterTimestamp` only moves on *restart* — after a SIGHUP it still read Aug 21, so a reloaded
+daemon and one running two-day-old config are indistinguishable from `systemctl status`. Nothing in the
+stack warns that the config on disk is newer than the process. `smokeping --check` validates the file,
+not what's in memory, so it would have passed happily throughout.
+
+### The RRD does not remember which address produced which sample
+
+`IPCameras/RPi3.rrd` has accumulated since 2025-07-25 as one continuous series. Changing `host =` does
+not start a new one. That graph now splices `.51` data onto two days of `.50` data onto whatever
+preceded it, under a title reading "(Ethernet)" for the entire period it was measuring WiFi. Nothing in
+the file records the change. The title describes intent; the RRD describes whatever was in argv that
+week. Worth knowing before reading any history off it.
+
+### The camera that looked like it was on WiFi
+
+Same shape, different box: `kura1` (a DCS-932L) had moved from WiFi to Ethernet, the Orbi wouldn't list
+it, and pinging it *felt* like WiFi while SmokePing showed wired latency.
+
+SmokePing was right. Measured from this box, 40 samples each, in ms:
+
+| target | avg | max | sd | reading |
+|---|---|---|---|---|
+| QNAP, wired | 0.26 | 0.33 | 0.03 | wired reference |
+| `kura1` | **1.10** | **1.98** | **0.17** | **wired** |
+| mesh satellite | 2.59 | 4.72 | 0.64 | wireless backhaul |
+| `engawa1`, 2.4 GHz | 12.26 | 48.10 | 8.88 | WiFi reference |
+
+Standard deviation is the discriminator, not the average. sd 0.17 is not a radio; `engawa1` at sd 8.88
+plainly is. `kura1` also beats the satellites themselves, so it isn't sitting behind a wireless
+backhaul either. An `nmap -sn` sweep of the whole `/24` found exactly one D-Link on the network,
+matching its single AdGuard reservation — no second interface anywhere, unlike the Pis, which each hold
+a `-wifi`/`-eth` reservation pair.
+
+So the wireless latency was at the measuring end, not the measured end: pinging from a laptop on WiFi
+puts a radio in the path no matter what sits at the far end. Two wired vantage points both showed it
+flat. The Pi 3 lesson arrived at from the opposite direction — establish where you are standing before
+attributing what you see to the target.
+
+**And the Orbi isn't blind, it just isn't the DHCP server any more.** AdGuard on this box has
+`dhcp.enabled: true`, so Netgear's Attached Devices list — populated largely from its own lease table —
+stopped seeing anything it doesn't lease. Absence from that list ceased to be evidence of anything the
+day DHCP moved here, which is documented four entries up and which I still managed to forget.
+
+Genuinely down while I was in there: `toilet1`, 100% loss, no ARP entry at all. Real, unrelated, and
+visible again now the reload has taken.
+
+### The alert mail was fine. Everything else's mail was not.
+
+The 2026-08-21 entry above ends "loss alerts now have somewhere real to go", and that holds —
+`Smokeping.pm`'s `sendmail` sub execs `sendmail -f $from`, so alerts carry a valid envelope sender. But
+six messages sat in the deferred queue retrying every 70 minutes, two of which bounced *after* that fix.
+
+They were not alerts. They were **cron mail** — the catcam RTMP log watcher and `IPCAMERAS/IPCAM1.sh` —
+and cron doesn't pass `-f`. Same ``550 Invalid `from` field`` from Resend, for the same reason as the
+manual tests: an envelope sender of `<local-user>@macmini` is not a routable address. The Aug 21 fix
+had addressed the one caller that already did the right thing, and left every other caller on the box
+broken.
+
+A second fault then stacked on top. Postfix tried to bounce those rejections back to local recipients,
+local delivery needs alias resolution, and `/etc/aliases.db` **did not exist** — `newaliases` had never
+been run. Every failure produced a bounce that itself could not be delivered, deferring forever at
+`status=deferred (alias database unavailable)`. A bounce loop that emits no bounce, which is precisely
+why a week of it made no noise.
+
+Fixed at the transport rather than per-caller, so it covers anything on the box that shells out to
+`sendmail`:
+
+```bash
+# /etc/postfix/generic
+@macmini    <alert-from>
+```
+
+```bash
+sudo postmap /etc/postfix/generic
+sudo postconf -e 'smtp_generic_maps = hash:/etc/postfix/generic'
+sudo newaliases
+sudo systemctl reload postfix
+```
+
+`smtp_generic_maps` applies only on delivery via the smtp transport, so local mail keeps local
+addresses and only what actually leaves the box gets a routable sender. Verified as the `smokeping`
+user with no `-f` at all: `status=sent`, Resend message ID in `mail.log`. Queue flushed to empty, all
+six bounces delivered to local mailboxes rather than discarded.
+
+One trap worth naming: `postmap -q smokeping@macmini hash:/etc/postfix/generic` returns nothing and
+exits 1. That is not a broken map — `postmap -q` does exact-key lookups and never applies `@domain`
+wildcard logic. The only honest test of a rewrite rule is to send a message and read `mail.log`.
+
+### The placeholder that was only harmless by accident
+
+`General` still carried `mailhost = my.mail.host` from the package example. `Smokeping.pm` tries
+`Net::SMTP` to `mailhost` **first** and only falls through to the sendmail branch when that connection
+fails. So every alert was paying a DNS lookup plus up to a 5 s timeout, and the whole alert path rested
+on `my.mail.host` continuing not to resolve. AdGuard hands out `local_domain_name: lan`; the day
+anything answers for that name, alerts stop arriving and nothing reports it. Removed the line.
+
+Adding `sendmail = /usr/sbin/sendmail` in its place was a mistake — `config.d/pathnames`, which
+`General` `@include`s, already sets it, and a duplicate definition is a parse error:
+
+```
+ERROR: /etc/smokeping/config.d/pathnames, line 1: variable already defined
+```
+
+`smokeping --check` caught it before the reload. The part worth remembering: `systemctl reload
+smokeping` returned 0 and left the service `active` with that error outstanding — the same "reload
+tells you nothing" problem that opened this entry, showing up again at the end of it. Check the config,
+then reload; the reload's own exit status is not the confirmation it appears to be.

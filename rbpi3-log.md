@@ -760,3 +760,134 @@ keep absorbing it.
 
 (Following this thread into the SmokePing config it was tripping turned up a second, unrelated problem
 on the box that hosts it — see `macmini-2012-log.md`.)
+
+**Retraction (2026-08-23), and its withdrawal the same afternoon.** I retracted this entry earlier
+today. The retraction was wrong. Both are kept here, because how I got it wrong is worth more than
+either conclusion.
+
+The retraction argued: SmokePing's target for this box is **.51** and the MAC in its remark is
+**eth0**'s, while QVR Pro was ingesting from **.50** — two addresses, two interfaces, so "both
+measuring the same blip" could not hold. Every fact in that sentence is true of the config file *as I
+read it today*. None of it was true on 2026-08-21.
+
+`/etc/smokeping/config.d/Targets` had an mtime of **2026-08-23 14:03** — hours before I read it. The
+`smokeping` daemon had last started **2026-08-21 18:23:59** and had not been restarted since, and
+SmokePing parses Targets only at startup. File and running process disagreed, and the process is the
+one that was doing the measuring. It can be read directly: the `FPing` probe shells out to a single
+`fping` per cycle with every target in argv, so `pgrep -x -a fping` caught mid-poll prints the loaded
+config verbatim. It listed `.50`. No `.51` anywhere in it.
+
+So on 2026-08-21 SmokePing was probing **wlan0** — the same interface QVR Pro was streaming from. The
+original reconciliation holds: same address, same wedge, two different tolerances for it. Conclusion:
+**restored**.
+
+One gap I can't close honestly: the observation that morning was served by an *earlier* daemon
+instance, and I can only prove the loaded value from the 18:23:59 restart onward. `Targets` carries no
+edit dated 2026-08-21 — only `General` and `Alerts` do — so the inference is that it read `.50` all
+day. It is still an inference.
+
+The error is the useful part. I read a config file in the present and used it as evidence about the
+past, without checking whether it had changed since the process that mattered last read it. A config
+file is evidence about a *process* only when its mtime predates that process's start time. Check both,
+and interrogate the running process directly where it will let you.
+
+`systemctl` gives no warning here. `ActiveEnterTimestamp` tracks the last *restart*, so it sits
+unchanged through any number of SIGHUP reloads — a freshly reloaded daemon and one running two-day-old
+config look identical from unit status. That blind spot is what hid this for two days.
+
+Also wrong in passing, and not rescued by any of the above: "a buffered RTMP stream". This box has
+served **MJPEG over HTTP** since 2026-06-21. RTMP is the catcam path on the Mac Mini, not this one.
+
+## 2026-08-23 — Retiring the radio on a box whose watchdog exists to keep the radio alive
+
+WiFi had been jittery, so the Pi went back on the Ethernet cable. The goal was narrow: stop this box
+competing for airtime. The segment is shared — the powerline run also carries the other camera and an
+Orbi satellite's backhaul — so a Pi pushing MJPEG over the radio costs more than just its own latency.
+
+### Plugging the cable in doesn't move the traffic
+
+eth0 came up at **.51** and took the default route (metric 100 against wlan0's 600), which looks like
+the job is done. It wasn't. `ss -tn` on port 8080 showed QVR Pro still established against **.50** —
+the wlan0 address. The stream, by far the heaviest thing this box does, was still going out over the
+radio. The default route only decides where *locally-originated* traffic goes; an inbound pull from
+the NAS lands on whichever address it was configured with, and QVR had been pointed at `.50` during
+the WiFi-only stretch. Nothing about plugging in a cable changes that.
+
+So "it's on Ethernet now" was true of the box and false of the workload. Worth checking by connection,
+not by interface state.
+
+### The watchdog would have fought every way of doing this
+
+`wifi-watchdog.timer` was enabled and firing every 60 s, running a script byte-identical (same md5) to
+the one in `rbpi4-catcam/`. It pings **wlan0's own gateway** with `ping -I wlan0`, deliberately ignoring
+the default route — correct for a WiFi-primary box, actively hostile here. With WiFi off, every pass
+fails, and the escalation ladder runs against a decision rather than a fault:
+
+| attempted disable | what the watchdog does about it |
+|---|---|
+| `nmcli radio wifi off` | `rfkill unblock wifi` + `nmcli radio wifi on` on **every** failed pass — undone inside 60 s |
+| `connection.autoconnect no` | `nmcli connection up preconfigured` at 2 fails — overridden inside ~2 min |
+| `dtoverlay=disable-wifi` | wlan0 never returns, so the counter never clears → `systemctl reboot` at 6 fails, **forever** |
+
+That last row is the one that would have hurt. The boot-loop guard only skips the reboot while uptime
+is under 10 minutes, so it doesn't prevent the loop — it paces it. The box would have rebooted roughly
+every sixteen minutes, indefinitely, and the "cause" would have looked like failing hardware.
+
+**The general shape:** a health check scoped to one component cannot distinguish *broken* from
+*deliberately retired*. Mine was written to defend wlan0 against firmware wedges, and it defended it
+just as vigorously against me. Any watchdog aggressive enough to reload a driver or reboot a host needs
+its off-switch to be part of the change that retires what it guards — not a separate thing to remember
+at the moment you're least likely to.
+
+### Order of operations
+
+1. `systemctl disable --now wifi-watchdog.timer` — first, because everything after it is something the
+   watchdog would revert.
+2. Repoint QVR Pro channel 6 to `.51`. Verified by watching the connection re-establish in `ss`, not by
+   trusting the UI.
+3. `connection.autoconnect no`, then `nmcli radio wifi off`.
+
+`STREAM_URL` in `/etc/default/pi-surveillance` already pointed at `127.0.0.1`, so motion detection was
+never in the blast radius — which is why the cutover had exactly one moving part. Loopback for
+same-box consumers is doing real work here; had that been an interface address, this would have been a
+two-front change.
+
+Result: `.50` gone, one default route, `phy0` soft-blocked, `WirelessEnabled=false` persisted in
+`NetworkManager.state`. QVR's socket survived the whole thing — same peer port before and after, never
+dropped a frame.
+
+Chose the rfkill soft block over `dtoverlay=disable-wifi` on purpose. Both give zero airtime, but the
+soft block is undoable over SSH on the cable, where the firmware disable needs hands on the hardware.
+For a headless box behind a powerline run, "reversible without a trip to the other room" is worth more
+than the certainty of the overlay. The watchdog is left installed but disabled, for the same reason.
+
+### The fallout: a runbook that encoded which address was dead
+
+`rbpi3-cam-rotate.sh` had a sequencing header telling me to park QVR channel 6 on **.51** — described
+as "dead eth = fails fast" — and restore it to **.50** afterwards. Both halves are now inverted. Run as
+written, step 1 would have parked the channel onto the *live* stream, and step 4 would have restored it
+to an address that no longer exists. Given that script's own warning that a stale credential on one
+channel stalls the entire QVR Pro instance, that's not a cosmetic staleness.
+
+Fixed by parking differently: **disable the channel**. The old instruction worked by naming an address
+that happened to be dead, which quietly made the runbook a hostage to the network topology on the day
+it was written. Disabling the channel expresses the actual intent — *stop ingesting* — and stays correct
+no matter which interface the box is on next year. Park by state, not by address.
+
+Not fixed, and deliberately so: the feed password is still passed in argv to both `mjpg_streamer` and
+`ffmpeg`, so it's readable from `/proc/<pid>/cmdline` by any local account. Rotation is pending and now
+unblocked, since the runbook it depends on is no longer backwards.
+
+### The monitoring was still watching the interface I'd just retired
+
+Taking wlan0 down took `.50` with it, and SmokePing — holding two-day-old config that still pointed at
+`.50` — began reporting this box dead while QVR Pro pulled from `.51` without dropping a frame. The
+same contradiction as 2026-08-21, arrived at from the opposite direction, except this time the
+monitoring genuinely was wrong.
+
+Retiring an interface means retiring every reference to it, and the reference most likely to be missed
+is the one living on a different machine that never announces itself. `.50`'s DHCP reservation
+(`raspberrypi3-wifi`, still in AdGuard) is harmless — nothing will ever claim it while the radio is
+blocked. The SmokePing target was not: it converted a planned, verified change into a false outage,
+and it would have kept doing so indefinitely, because editing the file is not what makes SmokePing read
+it. Chased down in `macmini-2012-log.md`.
