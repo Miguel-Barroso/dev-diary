@@ -588,10 +588,10 @@ It came back on its own because `Power_Recovery_Mode = 2` — the box is set to 
 state rather than stay off. Which is why I'd never had to think about any of this before: the failure
 mode and the recovery cancel out, and all you notice is a ten-minute hole.
 
-## It's been getting worse for two years
+## It's been getting worse — but not on one machine
 
-`[Power] The system was not shutdown properly last time.` is greppable, and the event log goes back to
-2021. Counting by year:
+`[Power] The system was not shutdown properly last time.` is greppable, and the event log reaches back
+to 2020-02-12. Seventeen of them. Counting by year:
 
 | Year | Unclean shutdowns |
 |---|---|
@@ -602,13 +602,44 @@ mode and the recovery cancel out, and all you notice is a ten-minute hole.
 | 2025 | 4 |
 | 2026 | **7** (to August) |
 
+That is the table I first published, and it is the wrong shape. Annual buckets destroyed the one
+feature in this data that actually matters.
+
+**The log is older than the chassis.** `/mnt/HDA_ROOT` is `/dev/md9`, a RAID1 that lives on the
+*drives*, not on the board. When my previous NAS failed in May 2025 I moved the disks into a
+second-hand replacement, and six years of event history came across with them. So this is one
+continuous record of my storage and my house, spanning two machines with two different power supplies.
+The migration is visible in the log itself: an abnormal shutdown at 2025-05-19 07:31:34, a RAID resync
+minutes earlier, a backup job aborting at 07:35, and 4,841 events logged that month against a
+550–1,400 monthly baseline.
+
+Split the same seventeen at the swap and the ramp disappears:
+
+| Machine | Unclean shutdowns |
+|---|---|
+| Old chassis, 2021-10 → 2025-05 | 10 — the last two three days apart, and then it died |
+| **This chassis, 2025-05 → 2026-02** | **0** |
+| This chassis, 2026-02 → 2026-08 | 7 |
+
+**Nine months of silence on the replacement, and then it starts.** "2025: 4" reads like the midpoint of
+a gentle slope; all four of those were on the old machine, and the new one was clean for the rest of
+the year.
+
 The times of day are scattered across the whole clock — 05:39, 10:15, 13:02, 16:10, 20:57 — so it
 isn't tracking a schedule, a backup window, or an afternoon heat soak. And 2026-02-16 produced three
 in one evening, which is the shape of either a supply failing under stress or a grid throwing repeated
 transfer events.
 
+What the split changes is which of those two it favours. If the mains here were uniformly hostile, the
+new box should have started failing on arrival — it didn't. Two supplies each degrading on their own
+clock fits a nine-month gap much better, and it fits how the old machine ended: quiet for years, then
+two failures in three days, then dead. I can't name anything that changed in this house in February
+2026, and I did go looking.
+
 I'd seen every one of these as a one-off. Each was individually forgettable; the trend is not. **The
-log had been telling me this for a year and I'd never once asked it the aggregate question.**
+log had been telling me this for years and I'd never once asked it the aggregate question — and when I
+finally asked, I asked at the wrong granularity and nearly drew the wrong conclusion from my own
+data.**
 
 ## Reconciling it with the battery
 
@@ -917,6 +948,34 @@ never had a problem at all. The bridge loop caused the gateway to be re-elected,
 the default route, and the tunnel dropped because its next hop vanished. It was the most visible
 symptom and the furthest thing from the cause.
 
+## A power cut ran the experiment for me
+
+Unrelated to the network, but it happened this afternoon and it's the cleanest evidence I've had on the
+power question I left open yesterday, so it goes here rather than getting lost.
+
+Yesterday this NAS lost power on its own. Both Raspberry Pis, on house mains and not on the battery,
+sailed through on multi-day uptimes. This afternoon the grid actually went out, house-wide — both Pis
+rebooted, and the NAS, the router and the Mac Mini, all behind the Delta 2, never noticed.
+
+That's a clean inversion, and I couldn't have arranged it better deliberately:
+
+| | NAS (on battery) | Pis (on mains) |
+|---|---|---|
+| 2026-08-22 | **went down** | up throughout |
+| 2026-08-23 | up throughout | **both rebooted** |
+
+Two things fall out of it. The battery does its job — demonstrated against a real outage rather than
+assumed from a spec sheet. And whatever took the NAS down yesterday reached exactly one device: the one
+*behind* the battery. A grid event cannot do that. Yesterday I wrote that a failing adapter "predicts
+exactly the same evidence" as a millisecond transfer sag, so I couldn't separate them. That stopped
+being true the moment the grid handed me a control group.
+
+Reading it out of uptimes rather than logs is the part worth keeping. The Pis don't log power events at
+all, but `uptime` back-calculates a boot time, and boot times either side of a known event are a
+measurement. One caveat I'd rather record than smooth over: the two Pis came back 68 minutes apart,
+which is more spread than one outage should produce. That isn't explained yet, and it's the sort of
+loose thread that turns out to matter.
+
 ## What I'd tell myself
 
 - A loop needs two paths, not two cables. Radio backhaul, powerline, a second SSID, anything
@@ -930,3 +989,7 @@ symptom and the furthest thing from the cause.
   that MAC is your identity on the network, and it may well belong to a port you think is dead.
 - When a fix lands, check the metric you were blaming *before* it. A number that doesn't move is
   telling you that you just fixed a different problem than the one you noticed.
+- When you finally aggregate a long log, check that your buckets aren't hiding the boundary. Mine were
+  annual; the fact that mattered was a nine-month gap sitting inside one of them.
+- A machine that outlives its chassis carries its history with it. Before reading a trend as one
+  machine getting worse, work out how many machines are actually in the data.
