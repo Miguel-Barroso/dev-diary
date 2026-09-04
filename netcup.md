@@ -1445,3 +1445,122 @@ day — so there was never any real traffic on the path I removed.
 The general lesson, and it's one I keep relearning: **the box you hardened against the internet is
 still a full-privilege peer everywhere else you didn't think about.** Locking the front door of a
 building doesn't help if every room shares one keyring.
+
+## 2026-09-04 — an alarm that couldn't stop what set it off
+
+Two problems this sitting, pulling in opposite directions. One where the alarm was going off
+constantly and there was nothing wrong with the alarm. One where I was certain something was broken
+and, after an hour of looking, found nothing at all. The second one taught me more.
+
+### The mailbox
+
+Wordfence had been mailing me about blocked login attempts across all five sites, steadily enough
+that I'd started ignoring the mail — which is the actual danger, not the volume. Two causes, and
+neither was a break-in.
+
+Four of the sites have "lock out invalid usernames" switched on, so any attempt to log in as a user
+that doesn't exist locks that address immediately and sends a mail. One bot request, one email.
+There's no aggregation. And the shop had its hourly alert cap sitting at `0`, which I'd assumed
+meant off and in fact means **unlimited** — the other four were at 5. A setting whose "off" value is
+"no limit" is a small piece of hostile design and I'd walked straight into it.
+
+### The part that actually mattered
+
+Before changing anything I pulled the numbers, and they reframed the whole problem. On the busiest
+site: 548 failed logins in seven days, from **181 distinct addresses**, averaging three attempts
+each. 148 of those 181 never made more than **two** attempts.
+
+The lockout threshold is five.
+
+So the traffic filling my inbox was never at any risk of being stopped by the mechanism filling my
+inbox. Every one of those addresses stays under the bar and can come back tomorrow, indefinitely. A
+per-IP counter is a good defence against one machine trying ten thousand passwords and **no defence
+whatever against ten thousand machines trying one password each** — and the second shape is what a
+commodity botnet actually is. I'd also had a Cloudflare rate-limit rule on the login path since the
+July hardening pass, and it has been doing precisely nothing since the day I made it, for exactly
+the same reason. I'd been counting the wrong thing and feeling protected by the count.
+
+A detail I enjoyed: the most-guessed username, by a wide margin, was the site's own title as
+displayed on the page. Something had scraped the header and tried it as a login. Wrong, obviously,
+but not stupid — it works often enough on small sites to be worth a request.
+
+### Two ways to fix it, and the tempting one is wrong
+
+The obvious move was to put Turnstile in front of `wp-login.php` with the plugin I already run on
+the contact forms. I went and read how it interacts with Wordfence before doing it, and it turns out
+it *would* have silenced the mail — for a reason that has nothing to do with stopping bots.
+
+WordPress builds its login result by passing a value down a filter chain. Core decides
+"no such user" at priority 20. The Turnstile plugin runs at 21 and, on a failed challenge,
+**replaces** that result with its own error. Wordfence inspects the result at 25 and 99 — and it
+only counts a failure when the error is one it recognises (`invalid_username`, `incorrect_password`
+and a few others). Turnstile's error isn't in that list, and the instant-lock path is keyed on
+`invalid_username` specifically. So the lockouts stop, and the mail stops, because Wordfence no
+longer recognises what it's looking at.
+
+The attempts still get *logged*, now relabelled as failures against a valid username — which is the
+exact field I'd just used to diagnose the problem. I'd have been poisoning next month's evidence to
+quieten this month's mail. And the requests still wake up PHP, WordPress, the database and the
+object cache every time; the only thing I'd have removed was my own awareness.
+
+So: a **managed challenge at the Cloudflare edge** on the login path instead. Same underlying
+challenge, run before the request reaches the box at all. Bots don't get a WordPress process, don't
+get a log line, don't get an email, don't cost me any CPU. I get one interstitial the first time I
+log in and a clearance cookie after that. Verified from outside afterwards rather than from the
+rules screen: every site returns a challenge on the login path, every homepage still returns 200,
+and the shop's customer account and checkout pages are untouched — those live on a different path
+and were deliberately left alone.
+
+### PUT replaces, POST appends
+
+Worth writing down because I nearly got it wrong. Four of the zones already had a rule in the
+custom-firewall phase from July. One had no ruleset in that phase at all.
+
+Sending a `PUT` to the phase entrypoint **replaces every rule in it**. It's the call the July
+hardening used, when there was nothing to overwrite, and reusing it here would have silently deleted
+four existing rules to add one. The append is a `POST` to the ruleset's own rules collection. I read
+the current state of all five zones first, used `PUT` only on the one that genuinely had no ruleset,
+and checked afterwards that both rules coexist on the other four. Reading before writing cost about
+a minute.
+
+### The logout that turned out not to be happening
+
+Separately: the shop keeps asking me to log in again, while the brochure sites don't. That has the
+shape of a real bug and I went looking for one properly — cookie domain and path, session lifetime,
+whether any plugin filters it, whether the salts are stable across container restarts, whether the
+edge was serving a cached anonymous page to a logged-in browser, whether the object cache was
+evicting session data, `www` versus apex, password rehashing invalidating cookies, sessions bound to
+a client address, the multilingual plugin's cross-domain login handler, even whether I used a
+different browser there.
+
+All of it identical across the five sites, or correct, or not applicable. Nothing wrong anywhere.
+
+The answer was that the cookie lasts two days everywhere, I've never ticked "remember me", and the
+shop is simply **the only site I come back to more often than every two days**. The others I visit
+about monthly: I log in, do the thing in one sitting, and leave before the cookie could possibly
+expire. I was comparing a single sitting on one site against return visits on another and reading
+the difference as a defect.
+
+I also got something wrong mid-investigation and want it on the record. I reported two ancient
+sessions as "still valid" — one five years old — when they had in fact expired years ago. WordPress's
+`human_time_diff` returns the size of a gap and says nothing about which side of now it falls on, so
+"5 years" reads identically for a login five years past and an expiry five years hence. I read a
+column of dead rows as live credentials and briefly told myself I'd found a security problem. The
+lesson is small and I'll still make it again: a duration is not a direction.
+
+The honest conclusion is *no defect found*, which is an unsatisfying thing to write and the correct
+thing to write. What makes it useful is the list of what was ruled out, so I don't spend another
+hour on it in November. The one thing the data genuinely can't distinguish is "came back after two
+days" from "logged out while working" — so if it ever happens mid-session, the conclusion above is
+wrong and I need the timestamp.
+
+### While I was in there
+
+The session table had accumulated 100 expired tokens across 85 accounts, the oldest from April 2020,
+long outliving both the hosting provider and the server they were created on. Cleared, keeping the
+seven that are actually live. They were inert — an expired token can't authenticate — so this was
+housekeeping and not a fix, which is a distinction I only got right on the second pass.
+
+The general lesson from the first half, and it's the one I want to keep: **a threshold you never
+reach is not a defence, it's a story you tell yourself.** The mail volume made the login attacks feel
+like the thing being handled. It was the thing being counted. Nothing had been stopped since July.
