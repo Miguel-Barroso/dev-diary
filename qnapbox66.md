@@ -991,5 +991,207 @@ loose thread that turns out to matter.
   telling you that you just fixed a different problem than the one you noticed.
 - When you finally aggregate a long log, check that your buckets aren't hiding the boundary. Mine were
   annual; the fact that mattered was a nine-month gap sitting inside one of them.
+
+---
+
+# A part number that matched and a cable set that didn't (2026-09-10)
+
+Today was supposed to be the day the power fault got fixed. The replacement supply had arrived, I took
+a full snapshot of the box at 10:52, shut it down cleanly, and got the lid off. The new unit went
+straight back in its box.
+
+It doesn't fit. Not the chassis — the **cables**. The harness on the replacement doesn't carry the
+connectors this machine needs, on a unit whose model number matches the one it's replacing character
+for character.
+
+That took the afternoon's motivation with it. Writing it up is the salvage operation, and there turned
+out to be three things worth recording that had quietly gone right while I wasn't looking at them.
+
+## "The power brick" was the wrong three words
+
+Start with my own language, because that's where this began. Every previous entry in this file calls
+the thing I need to replace **the power brick** — right down to "the power brick gets replaced
+regardless" in the 08-22 entry. A brick is an external adapter: a sealed lump on a cord with one DC
+plug on the end. Replacing one is a matter of matching volts, amps and barrel diameter.
+
+The TS-453 Pro doesn't have one. It has an **internal flex-ATX supply** — 250 W, screwed into a cage
+behind the drive bays, fed from the IEC inlet on the back panel. That is a completely different
+shopping problem, and I never went back and re-examined the shorthand I'd been using for months. I
+bought against the phrase instead of against the part.
+
+## The model number identifies the supply, not the harness
+
+Here's the actual trap, and it's a known one for these QNAPs.
+
+The mainboard side is ordinary — standard ATX pinout, nothing special. The **drive backplane** is not.
+It takes a QNAP-specific 20-pin connector, which owners have reverse-engineered as five pins of 5 V
+and five pins of 12 V on one side, ten grounds on the other. Electrically that's trivial; the pins are
+paralleled because the rail has to carry four drives through simultaneous spin-up. Mechanically it's
+specific to QNAP's board and appears nowhere else.
+
+And FSP builds the same base model in OEM variants with **different cable sets depending on which
+chassis it was destined for**. So:
+
+| | Replacement | What the TS-453 Pro needs |
+|---|---|---|
+| Model number on the label | identical | — |
+| Form factor, mounting, wattage | identical | — |
+| Mainboard connector | standard ATX | standard ATX ✅ |
+| Backplane feed | absent | QNAP 20-pin ❌ |
+
+The number on the label describes the supply. It says nothing about what's hanging off it. I matched
+on the identifier that was easy to compare and not on the one that determines whether the thing works,
+which is a mistake I'd like to think I wouldn't make in software and clearly do make in hardware.
+
+## Three ways out, and why I took the boring one
+
+**Build an adapter** from the new unit's SATA/Molex outputs into a 20-pin housing. Entirely on the DC
+side, nothing dangerous, and the pinout is public. But it means hand-crimping the rail that feeds four
+drives through spin-up — on the one box in this house whose entire diagnosed problem is *unreliable
+power*. Introducing a joint I made myself into that circuit is not a way to test a power hypothesis.
+
+**Transplant the original harness** onto the new supply's board. Cheapest, and the platforms match.
+It means opening a mains PSU. No.
+
+**Return it and buy again, by harness.** Which is what's happening. The official part exists and is
+priced like an official part; used originals turn up for a fraction of that. Either way the thing to
+ask the seller for is **a photograph of the cable set**, not a model number — and to compare it
+against a photograph of mine.
+
+It was unwrapped but never installed, which as far as I can tell keeps it inside the distance-selling
+right to withdraw: opening packaging to establish what an item is, is exactly what that right is for.
+If the listing claimed TS-453 Pro compatibility then "not as described" is the stronger line to take,
+because it puts the return postage on the seller rather than me. I photographed both harnesses side by
+side before packing it back up, which is the one genuinely productive thing I did today.
+
+## Eight days, no ninth event
+
+Since the fault is still unfixed, the count still matters. The improper-shutdown events on this
+chassis in 2026, read out of the event log:
+
+| Event logged | Gap since previous |
+|---|---|
+| 2026-02-16 19:37 | — (first after nine clean months) |
+| 2026-02-16 20:50 | 73 minutes |
+| 2026-02-16 20:57 | 7 minutes |
+| 2026-05-25 10:15 | 98 days |
+| 2026-05-29 12:35 | 4 days |
+| 2026-07-05 13:02 | 37 days |
+| 2026-08-22 11:29 | 48 days |
+| 2026-09-02 15:07 | 11 days |
+
+Nothing since. This morning the box was at 6 days 15 hours, counted from a manual reboot I did myself
+on 09-03 — so eight days clean, and no ninth event.
+
+Which proves nothing, and I want that written down before I start feeling reassured by it. This fault
+has gone 98 days between appearances. A quiet week and a half sits comfortably inside its normal
+silence. The only thing in that table I'd actually lean on is the shape of the tail — 48 days, then
+11 — because the previous chassis ended with two failures three days apart and then didn't come back.
+
+One precision worth keeping: these timestamps are when the NAS **came back**, not when it died. QTS
+writes the line on the next boot, so every interval above is boot-to-boot.
+
+## The load average halved and I didn't notice
+
+The 08-23 entry ended on a number that refused to move: load average 10.71 before the rewire, 10.46
+after, and my conclusion was that QVR Pro was what had been pinning the box all along.
+
+This morning's snapshot, same box, same job:
+
+```
+load average: 5.35, 5.25, 6.15
+```
+
+Half. The change in between was moving **Plex off the NAS and onto the Astromeda PC** — Windows 11,
+Docker Desktop — where it now reads its media off the QNAP over the network instead of living on it.
+
+So the August conclusion was half right in a way I should name. QVR Pro *is* the resident load, and
+the motion workers and that `mongod` are still here. But Plex was the other half, and I'd written it
+out of the picture entirely because I was busy being pleased about correctly ruling out the network.
+Finding one true cause is not the same as finding the cause, and a load average is a single number
+covering an unknown number of contributors.
+
+What it doesn't do is touch the crypto tax. Plex reading files over SMB still pulls every byte up
+through `dm-crypt` on a J1900 with no AES-NI; what left the building is the *transcoding*, not the
+decryption. And on that front I've stopped treating it as a task. Nothing short of a newer NAS with a
+CPU that has AES-NI changes the arithmetic, so it's a hardware limitation to live with rather than a
+thing to schedule.
+
+## Bay 4, reseated, and a number that can only ever look the same
+
+The lid was off anyway, so bay 4 finally got its SATA cable reseated — the drive that's carried
+`UDMA_CRC_Error_Count = 11` and `Command_Timeout = 11` since I first went looking, while the other
+three sit on clean zeros. This morning's baseline, taken before I touched anything:
+
+```
+ST8000VN004  (bay 1)   UDMA_CRC 0    Command_Timeout 0
+ST8000VN004  (bay 2)   UDMA_CRC 0    Command_Timeout 0
+ST8000VN004  (bay 3)   UDMA_CRC 0    Command_Timeout 0
+ST8000NT001  (bay 4)   UDMA_CRC 11   Command_Timeout 11   (worst 094, current 100)
+```
+
+Afterwards: still 11 and 11. Which is the *only* good outcome available, and it's worth being precise
+about why. These are cumulative raw counters. They cannot go down. A reseat can never be confirmed by
+today's reading — it can only be **disconfirmed later**, by the number climbing. The normalised
+current value being back at 100 against a worst of 094 already told me nothing recent had happened, so
+the reseat was preventive maintenance on a link that wasn't currently misbehaving.
+
+Hours of uptime is not evidence either way. This one goes on the watch list and comes off it in
+months, not days.
+
+## The box is a leaf now
+
+The last entry left the network in a state I described as safe-by-cabling rather than
+safe-by-configuration: Adapters 2, 3 and 4 still members of the Virtual Switch bridge, STP still off,
+and nothing but my own discipline stopping a future cable from closing the ring again.
+
+That's been fixed properly, by removing the NAS from the middle of the network entirely. There is now
+a **Linksys 8-port unmanaged switch**, and everything hangs off it:
+
+```
+Linksys 8-port (dumb)
+ ├── RBR50 router
+ ├── Sat1
+ ├── Mac Mini 2012
+ ├── HomePlug
+ └── QNAP — Adapter 1, one cable, the only port with anything in it
+```
+
+The snapshot agrees:
+
+```
+eth0: oper=up    speed=1000
+eth1: oper=down
+eth2: oper=down
+eth4: oper=down
+```
+
+One port up, three dark. The NAS forwards nothing for anybody, so there's no second path for a loop to
+close through and no reason to think about STP on this box again. The part that matters day to day:
+**rebooting the NAS no longer takes anything else off the network with it.** When it was carrying the
+satellite's traffic, every reboot — and this box reboots itself uninvited — was a small house-wide
+outage. Now it's just the NAS going away.
+
+And the thread from the last entry survives, usefully. The bridge still wears eth1's MAC
+(`00:08:9b:xx:xx:9d`), because a Linux bridge keeps a member's address with the carrier down and eth1
+is still nominally a member. That's the adapter I described as dead and wrote off — and it's the
+reason the DHCP reservation still matches and the box's address hasn't moved through any of this. The
+lease is still pinned to a port with no cable in it, and that is now the thing holding my network
+identity still.
+
+## What I'd tell myself
+
+- Check the shorthand you've been using for a part before you buy the part. I searched for months
+  against "power brick" and this machine has never had one.
+- A model number identifies a component. It does not identify what's attached to it. For anything OEM,
+  match on a photograph of the connectors.
+- The cheap DIY fix and the problem you're fixing can be the same circuit. Don't hand-crimp the rail on
+  the box you already suspect of power faults.
+- A cumulative counter can't validate a repair, only invalidate it later. Take the baseline, then wait
+  the real interval — not the interval your patience prefers.
+- When one true cause explains a symptom, check whether it explains *all* of the symptom. Mine
+  explained about half the load average and I stopped looking.
+- The best fix for "this device is in the path of everything" is usually to take it out of the path,
+  not to configure it more carefully.
 - A machine that outlives its chassis carries its history with it. Before reading a trend as one
   machine getting worse, work out how many machines are actually in the data.
