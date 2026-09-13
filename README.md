@@ -14,6 +14,7 @@ Self-taught developer notes from a decade of running things on my own hardware �
 
 ### Self-hosted infrastructure
 - [`qnapbox66.md`](qnapbox66.md) — Vaultwarden on a QNAP NAS with Caddy reverse proxy, Cloudflare DNS-01 certificates, the hardening pass that came after I caught myself doing something dumb with secrets, key-only SSH on a box where `PermitRootLogin no` would lock you out, using an *empty* kernel crash buffer to prove a reboot was a power event rather than a crash, and a bridging loop through the NAS's virtual switch whose second leg turned out to be a mesh satellite's wireless backhaul rather than any cable — plus the DHCP lease I found pinned to the MAC of an adapter I'd stopped using, a six-year shutdown trend that only made sense once I noticed the log had outlived the chassis it was written on, and a replacement PSU that matched the original on every digit of the model number and not on the one thing that mattered — the cable harness
+- [`astromeda-log.md`](astromeda-log.md) — a Windows gaming PC that became the busiest host in the house: multiple Minecraft Bedrock servers in Docker with Task Scheduler backups, the one-line "fix" I recommended here for months that was quietly making a server unjoinable, and the 2026-09 pass that moved the Hyper-V CI VM, Docker's data root and the WSL2 distro off an SMR drive onto a dedicated NVMe — including the disk that wouldn't attach until three Windows services let go of it, BitLocker encrypting the volume at the wrong cipher two seconds before I could pick one, a 25% "regression" that turned out to be an SSD's SLC cache rather than anything I'd configured, and going from one CI runner to three, which promptly proved that half the pipeline had assumed one job at a time
 - [`macmini-2012-log.md`](macmini-2012-log.md) — 2012 Mac Mini repurposed as a 24/7 cat-café livestream host and network-wide AdGuard DNS server, with OBS hardware encoding, AdGuard DHCP takeover, what it takes to put the household resolver behind a deny-by-default policy without taking the house offline, closing an RTMP ingest that was open by default on both play and publish, finding postfix had been silently dead for weeks while wiring SmokePing's alert mail through a real relay, and later catching that same SmokePing running two-day-old config against an address I'd retired — while a bounce loop that emits no bounces quietly ate every cron mail on the box
 
 ### Raspberry Pi
@@ -24,7 +25,6 @@ Self-taught developer notes from a decade of running things on my own hardware �
 ### Web and games
 - [`miguelbarroso.com.md`](miguelbarroso.com.md) — `fswatch` and `rsync` continuous sync to a SiteGround WordPress install, and why I eventually abandoned the approach
 - [`nekocafetime.com.md`](nekocafetime.com.md) — WooCommerce and WPML variation-translation troubleshooting
-- [`astromeda-log.md`](astromeda-log.md) — running multiple Minecraft Bedrock servers in Docker on Windows, with automated backups via Task Scheduler, and the one-line "fix" I recommended here for months that was quietly making a server unjoinable
 
 ---
 
