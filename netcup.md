@@ -203,8 +203,8 @@ A minimal, paste-safe sweep is just:
 
 ```zsh
 imapsync \
-  --host1 es1006.siteground.eu --port1 993 --ssl1 --user1 info@nekocafetime.com --passfile1 pw \
-  --host2 imap.migadu.com      --port2 993 --ssl2 --user2 info@nekocafetime.com --passfile2 pw \
+  --host1 es1006.siteground.eu --port1 993 --ssl1 --user1 info@<domain> --passfile1 pw \
+  --host2 imap.migadu.com      --port2 993 --ssl2 --user2 info@<domain> --passfile2 pw \
   --automap --dry          # drop --dry for the real run; re-running is the delta
 ```
 
@@ -414,7 +414,7 @@ Right after enabling everything, the owner got Wordfence-locked out of **omi-hou
 diagnosis turned out to be a feature, not a bug:
 
 > 💡 The block was on the owner's **real** IP (`<owner-ip>`, a Japanese ISP), reason:
-> *"Used an invalid username `info@omi-house.se` to try to sign in."* They'd logged in with
+> *"Used an invalid username `info@<domain>` to try to sign in."* They'd logged in with
 > the **email**, but the WP username is `omi_admin` — and the "lock out invalid usernames
 > immediately" rule I'd enabled did its job. The silver lining: WF seeing the *real* client IP
 > (not a Cloudflare/proxy address) was live proof that `HTTP_CF_CONNECTING_IP` detection was
