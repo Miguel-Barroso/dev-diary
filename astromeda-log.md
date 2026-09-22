@@ -318,6 +318,13 @@ Meanwhile a Samsung 1 TB NVMe (PM981a, `MZVLB1T0HALR-000L7`, disk 2) was sitting
 machine holding a Pop!\_OS install I had not booted in months. The plan: back it up, wipe
 it, and give it entirely to the things that hurt on SMR.
 
+> **Provenance, for the record:** that Pop!\_OS install is the one written up in
+> [`x1e-pop-os.md`](x1e-pop-os.md) — the drive came out of the ThinkPad X1 Extreme, which
+> has since stopped dual-booting and gone purely Windows 11. So this CI drive and the end of
+> that laptop's dual boot are the same event seen from two ends. Dropping the dual boot is
+> also what let Secure Boot go back on over there, which turned out to matter for BitLocker:
+> see [`x1e-win-11.md`](x1e-win-11.md).
+
 ### Getting the disk away from Windows long enough to read it
 
 Before wiping, I wanted the LUKS partition's contents. The old layout was EFI 1 GB /

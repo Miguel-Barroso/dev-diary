@@ -1195,3 +1195,45 @@ identity still.
   not to configure it more carefully.
 - A machine that outlives its chassis carries its history with it. Before reading a trend as one
   machine getting worse, work out how many machines are actually in the data.
+---
+
+## 🔑 Dev Diary — The desktop client was leaking this box's admin password
+
+**Date:** 2026-09-20
+**Cross-reference:** full writeup in [`x1e-win-11.md`](x1e-win-11.md)
+
+Worth recording here because the exposed credential was **this NAS's `admin` account**, even
+though the leak happened on a client machine.
+
+QVR Pro Client on the Windows laptop writes its connection string into its own logfiles in
+the clear:
+
+```
+qvrpros://admin:<secret>@<qnap-lan-ip>:6661
+```
+
+19 files spanning 2026-06-04 to 2026-09-17, plus a `PanguDmp` HTTP capture holding the raw
+POST body to `/cgi-bin/authLogin.cgi` — so the password appeared twice over, as a URI and as
+a form field.
+
+Hashing every occurrence and counting distinct values gave **one hash** across three and a
+half months and many reboots. A static, long-lived password, not a session token. And it was
+`admin` — full administrator on the box that runs Vaultwarden.
+
+NAS-side actions taken, in this order, because purging logs that contain a still-valid
+password achieves nothing:
+
+1. **Rotated the `admin` password.**
+2. Created a dedicated **scoped account** for the camera client. Verified against the NAS's
+   own auth response that it reports `isAdmin: 0` — checked the server's answer rather than
+   trusting the account-creation UI.
+3. Only then purged the client's logs (201 MB → 0).
+
+There is no log-level setting that stops QVR writing this, and it rewrites the credential on
+every launch, so the purge has to recur. It now runs from the laptop's monthly maintenance
+task.
+
+**The lesson that generalises:** a credential in a process argument dies with the process. A
+credential in a logfile persists, gets backed up, and syncs. Any service account that a
+desktop client authenticates with should be scoped to what that client actually needs —
+because you should assume the client will write it down somewhere.

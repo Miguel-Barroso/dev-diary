@@ -320,3 +320,28 @@ And if you give Linux a filesystem that might not exist yet…
 Linux will simply refuse to boot.
 
 Now it boots fast, mounts instantly, and my home server genuinely feels like part of the laptop.
+
+---
+
+## 🪦 Retired — 2026-09
+
+**Pop!_OS is no longer on this machine.**
+
+The X1 Extreme has stopped dual-booting. The SSD that Pop!_OS lived on was pulled and
+repurposed as the dedicated CI drive on Astromeda — see
+[Moving the CI VM, Docker and WSL onto a dedicated NVMe](astromeda-log.md#moving-the-ci-vm-docker-and-wsl-onto-a-dedicated-nvme).
+The laptop is now purely Windows 11, and the Linux work in this file happens in a WSL2
+Ubuntu guest instead.
+
+Everything above still stands as a record of how it was set up, and the Tailscale/PIA and
+`fstab` conclusions transferred to WSL more or less intact. Two things did not survive the
+move, and both turned out to matter more than the dual boot itself:
+
+- **Secure Boot had been off** to accommodate dual booting. With nothing else to boot it
+  went back on — which is the precondition for BitLocker binding the TPM to PCR7 rather
+  than the firmware-brittle PCR 0/2/4/11 fallback.
+- **Hybrid graphics is back on.** The iGPU had been disabled in the BIOS, which was what
+  caused this machine's boot hangs. Re-enabling it fixed them and restored Optimus
+  switching.
+
+Continued in [`x1e-win-11.md`](x1e-win-11.md).
