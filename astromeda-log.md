@@ -733,3 +733,138 @@ takes ninety seconds on the rare occasions it matters.
 The useful conclusion isn't that the hardware is impressive. It's that I spent three days
 instrumenting a machine to discover the bottleneck was a remote desktop protocol, and the
 instrumentation only became valuable *because* it ruled everything else out convincingly.
+
+---
+
+## A backup that only existed on the machine it was backing up
+
+**Date:** 2026-09-24
+
+Follow-on from the entry above. Having established that the box copes fine under
+combined load, I spent a day on the things that were quietly wrong rather than slow —
+and the worst of them was one I had built myself, three days earlier, and believed was
+finished.
+
+### The gap
+
+I had written a nightly config backup for the CI VM: capture the firewall ruleset, the
+SSH hardening, the cron entries, the runner configuration, a package manifest — the
+things a rebuild cannot derive. Installed it, verified it, watched it fire unattended at
+03:45 and produce a 31 KB archive. Ticked it off.
+
+The archive was on the VM. Only on the VM. I had also written the host-side script that
+pulls it onto two separate disks, deployed that script, and **never registered the
+scheduled task that runs it**. So for two nights the machine had been diligently backing
+itself up onto itself.
+
+🔴 **"The script exists" and "the job is scheduled" are different claims, and finishing
+the first one feels exactly like finishing the second.** This is the same failure this
+log already records for the nightly cleanup script — written, merged, never installed —
+and I reproduced it in a fortnight, in the component whose entire purpose is surviving
+the loss of the machine it runs on. The check that catches it is trivial and I did not
+run it: list the scheduled tasks and look for yours.
+
+### Compaction does nothing without a trim
+
+The VM's virtual disk had grown to 103.8 GB of a 120 GB dynamic maximum while the guest
+was using 32 GB. So: shut the VM down, take a rollback copy, compact, restart. It
+reclaimed **nothing** — identical size, fifteen seconds.
+
+Compaction can only reclaim blocks it can prove are free. On a Linux guest that means
+blocks the filesystem has explicitly *discarded*; blocks merely freed by deleting a file
+still contain stale data and look occupied from outside. The periodic trim timer had last
+run three days earlier, so everything the CI had churned since was opaque to the host.
+
+I had checked that trim was *supported*, and I had read the timer's last-run date, and I
+proceeded anyway. Both facts were on screen. The obvious conclusion from "last trimmed
+three days ago" and "the file is 70 GB larger than its contents" is the one I didn't
+draw. Cost: a three-and-a-half minute outage for a no-op.
+
+With a trim first — which discarded **64.8 GiB** — the same compaction took 17 seconds
+and recovered **25.3 GB**. Note the gap between those two numbers: discarding a block
+inside the guest and reclaiming it in the disk file are not the same event, and not every
+discard propagates as something the host can act on. The disk is now 77.9 GB with the
+guest still using 32 GB, so roughly 46 GB of slack remains and a second pass would
+probably find some of it. Not worth another outage.
+
+### The elevation inversion
+
+A thing I had assumed backwards all week. Remote desktop sessions run with a UAC-filtered
+token, so every administrative command I tried through one was refused. I had been
+working around it for days by handing commands over for someone to run in an elevated
+window.
+
+SSH is the opposite. The SSH daemon runs as the system account and constructs the user's
+token directly rather than going through a filtered network logon, so a member of the
+administrators group gets a *full* token. The moment I switched from remote desktop to
+SSH, every command that had been failing worked — hypervisor management, virtual disk
+inspection, scheduled task registration, all of it.
+
+⚠️ So on this machine **SSH is strictly more privileged than the graphical remote path**,
+which is the reverse of what the graphical session's richer interface suggests. Worth
+knowing before assuming a shell is the lesser tool.
+
+### Two traps in adding SSH to Windows
+
+Both cost nothing if you know them and are invisible if you don't.
+
+**The installer opens the port to everyone.** Adding the SSH server capability creates a
+firewall rule allowing port 22 from any address. My network policy is deny-by-default and
+grants SSH to exactly one machine — but that policy governs the overlay network and says
+nothing about the local subnet. Leave the rule and nothing fails: the intended path works
+perfectly while a second, ungoverned door sits beside it on the LAN. That is the failure
+mode a policy file cannot detect, and the only place to catch it is on the host.
+
+**Administrator accounts do not read the usual authorized-keys file.** They read a
+separate machine-wide one, and ignore the per-user file entirely. That file's permissions
+must also be restricted or the daemon silently refuses to use it — it fails closed, which
+is the right direction, but it presents as "key rejected" with nothing in any log saying
+why.
+
+Verify the result from the client, not the server: ask the server which authentication
+methods it offers and read the reply. A configuration file saying password auth is
+disabled is a claim; the server's own answer is evidence. (And disabling password auth
+alone is not enough — keyboard-interactive is a separate setting and stays open unless
+you turn it off too.)
+
+### The memory that was never in use
+
+Earlier I found the Linux subsystem holding 32 GB while genuinely using 4.3 GiB; the rest
+was clean page cache the host could not see as reclaimable. I enabled gradual reclaim and
+reported a 30 GB improvement, with the caveat that a reading taken minutes after a restart
+proves a clean start and nothing about reclaim.
+
+So I let it run for five hours across a two-hour film and three hours of idle afterwards,
+sampling every two minutes. It climbed **+8.08 GB** during playback and returned
+**9.65 GB** afterwards — 119% of the climb, finishing 1.57 GB *below* where it started.
+Page cache drained from 8.91 GB to 0.21 GB and the host got all of it back.
+
+That is the measurement the earlier entry was missing. The fix works, and the more
+aggressive option I had lined up as a fallback is not needed. Worth noting the shape of
+the test rather than the result: the load phase alone would have shown the climb and told
+me nothing, because **the question was never whether cache grows — it was whether it
+comes back.** A sampler that stopped when the credits rolled would have captured exactly
+the uninformative half.
+
+### Assorted smaller things
+
+⚠️ **An unattended upgrade needs to be told it is unattended.** `apt-get -y upgrade`
+answers yes to *installing* but nothing to configuration questions, so it dropped a
+headless VM into an interactive keyboard-layout menu, then a console character-set menu,
+over a nested SSH session with a broken clipboard. The environment variable that
+suppresses those prompts is not optional on a server; neither is the option that keeps
+existing config files when a package ships a new one.
+
+⚠️ **The default shell for SSH on Windows is the old command interpreter**, not
+PowerShell. Handing someone a `.ps1` to run by typing its path does nothing at all — the
+shell tries to *open* the file rather than execute it, and fails silently. A `.cmd` works,
+or change the default shell, which is a registry value. Note the accompanying
+command-option value differs between the two shells; I set it to the command interpreter's
+form first and had to correct it.
+
+### What I would tell myself on Monday
+
+Three of the four real problems this week were *absences*: a scheduled task that was never
+registered, a trim that was never run, an elevated shell I already had and didn't know
+about. None of them announced itself, and none would have been caught by watching the
+system more closely — only by checking whether the thing I believed existed actually did.
