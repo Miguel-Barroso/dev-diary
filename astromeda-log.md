@@ -630,3 +630,106 @@ root-equivalent inside the VM regardless of sudo**. The workflows genuinely need
 so this is accepted rather than fixed, and the VM is treated as the blast radius —
 egress from it is dropped to the LAN, the NAS and the tailnet, there are no host
 filesystem mounts into the guest, and nothing on the host trusts it.
+
+---
+
+## The sluggish game that had nothing to do with the hardware
+
+**Date:** 2026-09-23 → 2026-09-24
+
+This machine now does five things at once: a workstation, a gaming rig, two Minecraft
+Bedrock servers, a Plex server, and a Hyper-V CI VM running three self-hosted runners.
+Minecraft felt sluggish while CI was busy, so I went looking for contention. I found
+none, because there wasn't any — and the three days it took to establish that were worth
+more than the answer.
+
+### Everything had slack, and the game was still bad
+
+Host CPU peaked at 83%. The Windows processor queue averaged 0.9 on sixteen logical
+processors. The Bedrock server's tick threads were starved for 0.018% of wall clock. The
+GPU sat at 514 MHz of a ~1777 MHz boost, drawing 16 W. Nothing was saturated, nothing was
+waiting, and it still stuttered.
+
+The cause was that I was playing over **RDP**. The client was rendering into the Microsoft
+Remote Display Adapter at **32 Hz**, not the GPU's 3440×1440 output. No amount of CPU
+would have fixed a display pipeline that only presents 32 frames a second.
+
+🔴 **Check which display adapter the thing is actually rendering into before you profile
+anything.** `qwinsta` would have told me on day one which session I was in. I spent that
+day measuring CPU, GPU, scheduler pressure and memory instead — all of which were fine,
+and all of which I now have baselines for, so it wasn't wasted. But it was the wrong
+question, asked thoroughly.
+
+### The measurement that was wrong by 1100×
+
+To decide whether CI was starving the game servers I used `run_delay` from
+`/proc/<pid>/schedstat` — nanoseconds a task spent runnable but not scheduled. It read
+essentially zero, so I reported the servers were untouched.
+
+`/proc/<pid>/schedstat` reports **the main thread only**. The Bedrock server runs 19
+threads and its main thread does almost nothing: 8 ms of CPU against 8909 ms for the
+process over the same window. I had been measuring an idle thread and calling it a server.
+
+⚠️ Sum `/proc/<pid>/task/*/schedstat` instead. The corrected numbers were still small —
+0.009% to 0.025% of wall across every scenario — but they were *measurements* rather than
+an artifact. Being right for the wrong reason is still being wrong, and it would have
+fallen apart the moment someone loaded the box differently.
+
+### Queue length, not CPU%
+
+The one signal that tracked reality was the Windows processor queue — threads ready to run
+with no processor free. Under the heaviest combined load (a CPU-bound game, a Plex
+hardware transcode, remote desktop streaming, two Minecraft players and three CI runners)
+the queue's worst spikes landed at **68–72% host CPU, not at the 85.5% peak**. Utilisation
+and contention are decoupled, and averages hide the spikes entirely: 38 of 51 samples sat
+at ≤2, then single samples at 8, 9, 10 and 12.
+
+That distribution is exactly what a vsync cliff feeds on. The game was capped at 60 and
+dropping to the low 30s — not gradual degradation, but frames missing a 16.7 ms window by
+a hair and waiting for the next refresh. A small stall, a large visible drop.
+
+### More cores did not make CI faster
+
+While I was in there I tested giving the CI VM 12 vCPUs instead of 8, on an eight-core
+host. Guest CPU pressure halved and the VM genuinely consumed the extra capacity. Wall
+clock did not improve: the critical-path browser leg came in at 15.1 and 16.2 minutes
+against a baseline of 15.9 and 16.0.
+
+The reason was in the test config all along — the browser runner is set to one worker,
+deliberately, because the suite shares one dev server and one database. A serial critical
+path does not get shorter when you add cores to the machine around it. Reverted to 8.
+
+⚠️ I also nearly quoted the wrong variance. I warned that this harness swings ±25% and
+that four samples couldn't resolve anything — but that figure came from the *disk*
+benchmarking earlier in this log, not from the test suite, which repeats to within 3–4%
+per leg. Reusing a number across two harnesses because both live on the same box is a
+quiet way to talk yourself out of a valid result.
+
+### 32 GB of memory that was not actually in use
+
+Separately: Windows was sitting at 88% physical with commit at 64 of 67.9 GB, and ~29.6 GB
+had been pushed to the pagefile. The consumer was WSL2, holding 32 GB.
+
+It wasn't using it. Inside, Linux reported 4.3 GiB used and 27 GiB of clean page cache
+(`Dirty: 56 kB`) — file cache from container image pulls and media reads, which Linux will
+release instantly under pressure and correctly reports as available. Windows just can't
+see that, so it sees 32 GB occupied and starts trimming working sets to compensate.
+
+`autoMemoryReclaim=gradual` in `.wslconfig` returned about 30 GB of commit. Two honest
+caveats: the documented default is already `dropCache`, so the absence of the setting is
+not "reclaim disabled" — the 27 GiB I measured is the evidence, not the config. And a
+reading taken minutes after a restart proves nothing about reclaim; it proves a clean
+start. The test is whether the cache comes back down *after* it has been rebuilt.
+
+### What it holds up to
+
+With all five workloads running simultaneously the box peaked at 85.5% and never ran out
+of processors. The servers stayed responsive throughout. The only real cost was occasional
+frame-pacing hitches in a 2011 engine bound on a single thread — and having measured what
+it would take to fix that (throttling CI when the desktop is busy, with detection,
+hysteresis and a failure mode for each), I decided it wasn't worth building. Cancelling CI
+takes ninety seconds on the rare occasions it matters.
+
+The useful conclusion isn't that the hardware is impressive. It's that I spent three days
+instrumenting a machine to discover the bottleneck was a remote desktop protocol, and the
+instrumentation only became valuable *because* it ruled everything else out convincingly.
