@@ -344,4 +344,7 @@ move, and both turned out to matter more than the dual boot itself:
   caused this machine's boot hangs. Re-enabling it fixed them and restored Optimus
   switching.
 
+Last trace removed 2026-09-25: two "Pop!_OS 22.04 LTS" UEFI boot entries were still in
+firmware, pointing at a `systemd-bootx64.efi` that no longer existed on the ESP. Deleted.
+
 Continued in [`x1e-win-11.md`](x1e-win-11.md).

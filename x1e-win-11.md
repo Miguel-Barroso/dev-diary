@@ -17,6 +17,13 @@ Crucial P1 1 TB NVMe (QLC), TPM 2.0 (STM).
 bound to PCR 7+11 · **hybrid graphics back on** — the iGPU had been disabled in the BIOS,
 which was the cause of this machine's boot hangs. Re-enabling it fixed them and restored
 Optimus switching, so the discrete 1050 Ti is no longer driving the panel at idle.
+P1 on firmware P3CR013 · no device in an error state · crash-on-hang armed · monthly
+integrity + Defender tasks verified · Ultimate Performance kept on purpose (measured, below).
+
+**Role since 2026-09-25:** a desk machine. Always on AC and Ethernet, never travels — a second
+screen, Plex client, occasional gaming, dev in WSL. Battery charge held at 75–80 %. That
+changed which optimisations were worth making: battery-life tuning stopped mattering, and
+charge limits and link stability started to.
 
 > ⚠️ **Never use "OS Optimized Defaults" or "Restore Factory Defaults"** in this machine's
 > BIOS. It resets the iGPU setting and brings the boot hangs straight back, and it changes
@@ -24,7 +31,148 @@ Optimus switching, so the discrete 1050 Ti is no longer driving the panel at idl
 
 The running theme of this file, which I did not set out to write about: **almost every tool
 on this machine reported success it had not achieved, and every single time the thing that
-caught it was a second, independent measurement.** Four separate instances below.
+caught it was a second, independent measurement.** The tally is at the bottom.
+
+---
+
+## 🔋 Dev Diary — The laptop that died when you picked it up
+
+**Date:** 2026-09-25
+
+For years this machine would occasionally just *go off* when carried around: no blue screen,
+no freeze first, just dark. It's one of the reasons it lives on a desk stand now instead of
+in a bag. I wanted to know if anything in the logs had ever explained it.
+
+### Two populations of Kernel-Power 41
+
+The full System log goes back to 2025-08 (36,787 events) and has eleven Event 41s ("the
+system rebooted without cleanly shutting down"). Decoding the XML fields split them in two:
+
+- **3** with `PowerButtonTimestamp != 0`. That's me holding the button during the boot hangs,
+  which were already solved (see the iGPU entry below).
+- **8** with `BugcheckCode = 0` **and** `PowerButtonTimestamp = 0`. No crash, no button.
+  Power just went away, and Windows never got a chance to write anything. That's why they
+  looked "unexplained".
+
+What came right before each of the eight:
+
+```
+blackout           SleepInProg  min since   context
+                                unplug/resume
+2025-11-12 19:43        0          -        fingerprint driver installing
+2025-11-13 10:00        0          -        4 min after the boot above; died again
+2025-11-24 12:00        5        125        died ENTERING sleep; accelerometer event 10 min before
+2025-11-29 18:58        0          -        mid-session
+2026-03-23 11:05        0          3.7      Wi-Fi "Roam Complete" x2 -- literally being carried
+2026-04-21 17:25        0          1.3      80 s after unplugging
+2026-07-20 00:51        0          1.1      60 s after resume + unplug
+2026-09-10 16:52        6          -        17 s after resume
+```
+
+Four of the eight are 1–4 minutes after going to battery or in the middle of a sleep
+transition, and one has the laptop moving between access points. Nothing software-side came
+before any of them: WHEA 0 in all history, zero bugchecks, NTFS healthy, no thermal events.
+
+### A battery curve that went up
+
+`powercfg /batteryreport` showed full-charge capacity *rising*, twice, and my first reading
+was "those are battery replacements". The user corrected me: the replacements happened
+before the log window. So what happened on those two dates was:
+
+```
+2025-11-17  cumulative update + reboot  ->  ACPI Event 15 x5 (EC returned unrequested data)
+2026-02-13  Lenovo power-management driver updates + reboots  ->  ACPI Event 15 x5
+```
+
+Full-charge capacity **cannot physically go up**. A jump is the embedded controller's fuel
+gauge re-initialising after a driver or firmware change. It then reports a stale estimate
+until a real discharge forces it to relearn. That fits exactly: a dead-flat 71,980 mWh for
+ten weeks on AC, then the 2026-04-21 unplug (dead in 80 s, followed by a "Sleep Reason:
+Battery" critical sleep) relearned it down to 62,630 in a week.
+
+With the artifact taken out, **all of the real capacity loss (~9 %) happened Sep–Dec 2025**,
+and it's been flat since. That window has four of the eight hard cutoffs under load, and a
+hard cutoff under load is about the worst thing you can do to a lithium pack.
+
+### What I think it is
+
+The pattern of death 17 s to 4 min after unplug or resume, never hours in, looks like
+**voltage sag under a load spike**. Resume kicks off WSL, Defender and GPU init, the
+8750H + 1050 Ti can pull 90–100 W for a few seconds, and a pack (or a battery path on the
+board) with raised internal resistance sags below the BMS under-voltage cutoff. The BMS then
+disconnects the cells instantly. Lenovo's battery diagnostic measures capacity and resting
+voltage at low load, which is why it keeps passing.
+
+Two things sped up the aging regardless: being held at 100 % on AC 24/7, and Ultimate
+Performance idling the CPU at ~3.8 GHz right next to the pack. The first is now fixed
+(threshold 75–80 %, set via Vantage and confirmed there).
+
+Windows can't see below this layer, so there's nothing more to find in logs. The connector
+was reseated in September when the Pop!_OS NVMe came out, and the machine hasn't been on
+battery since, so whether that fixed it is **untested**. The cheap test, if it ever matters:
+charged pack, unplug, resume from sleep, load a game for five minutes. On a desk, on AC, the
+fault has no trigger.
+
+> I got the battery swaps wrong because an upward step *looked* like a new pack. The better
+> first question was "can this number physically go up?" It can't.
+
+---
+
+## 🖥️ Dev Diary — Tuning it as a desktop, and the power setting that does nothing
+
+**Date:** 2026-09-25
+
+Once it was settled that this machine never moves, some of the laptop defaults were working
+against it.
+
+### Applied
+
+| change | why | rollback |
+|---|---|---|
+| Charge threshold 75 → 80 % (Lenovo `PWRMGRV` registry, then confirmed in Vantage) | lives on AC; calendar aging at 100 % is 2–3× faster | Vantage UI |
+| I219-V Ethernet: EEE, Ultra Low Power Mode, Reduce Speed On Power Down → off | power-saving link states on a desk NIC are just a source of link renegotiation; Wake-on-Magic-Packet left on | set the three keywords back to 1 |
+| Game DVR background recording off | constant background capture/encode for a feature I don't use | two registry values back to 1 |
+| ~25 GB of orphaned WSL `swap.vhdx` in `%TEMP%` deleted | eleven GUID dirs from VM sessions that ended in a power-button shutdown; C: free 558 → 582 GB | — |
+| Two dangling "Pop!_OS 22.04 LTS" UEFI boot entries removed | pointed at `\EFI\systemd\systemd-bootx64.efi` on an ESP with no `systemd` dir | — |
+| Firefox Default Browser Agent task disabled | telemetry | re-enable the task |
+
+The last three needed a human at an elevated prompt. Bulk temp deletion and boot-entry
+removal are exactly the sort of thing an agent should hand back to you as a script rather
+than do itself.
+
+I also asked whether any partition on the 1 TB NVMe could go. No: it's EFI (260 MB), MSR
+(16 MB), C: and Recovery (1.2 GB), and all four are load-bearing. The Pop partition went with
+the other SSD.
+
+### Measured and reverted: the idle clock
+
+Ultimate Performance idles at **~3.8 GHz** (`% Processor Performance` ~175 % at 10–20 % busy).
+The obvious lever, minimum processor state 100 → 5 %, did **nothing**: still 3.88 GHz. With
+hardware P-states the CPU ignores the min-state floor while the energy-performance preference
+(EPP) is 0. So I swept EPP, with 12-thread busy loops for the load column:
+
+```
+EPP   idle       all-core load
+  0   ~3.8 GHz   ~3.6 GHz
+ 25   ~3.8 GHz   ~3.56 GHz
+ 40   ~3.1 GHz   ~3.0 GHz
+ 50   ~2.2 GHz   ~2.8 GHz
+```
+
+Every value that lowers the idle clock also cuts all-core turbo by ~20 %. Gaming is a real
+workload here, so both went back to the Ultimate defaults. That finally closes the
+power-plan question with numbers. (In an earlier session I'd switched to Balanced on a
+generic "it runs hot" heuristic, with no temperature reading and no throttling observed, and
+reverted it the same day.)
+
+Gotcha: `powercfg /query` prints nothing for `PERFEPP` on this plan (hidden attribute), but
+`/setacvalueindex` on it takes effect immediately.
+
+### Checked and fine
+
+Sleep/display timeouts already "never" on AC, hiberfil absent, Fast Startup off, TRIM on,
+Storage Sense on, no throttling or WHEA events in 30 days, Plex is the desktop client only
+and mpv is on hardware decode.
 
 ---
 
@@ -331,6 +479,71 @@ and me reading an empty `Get-BitLockerVolume` as "not encrypted."
 
 ---
 
+## 📹 Dev Diary — QVR Pro won't open after sleep, and the fix that made it worse
+
+**Date:** 2026-09-11 → 2026-09-23
+
+After a wake, clicking QVR Pro Client did nothing visible. Its log said why:
+
+```
+connected to QVR Pro server <qnap-lan-ip>:6661
+Server error: The bound address is already in use
+```
+
+The client binds a fixed local socket and has no working single-instance guard. The instance
+from before the sleep survives with a dead session. The new one authenticates, connects, fails
+to bind, and never shows a window. Reproduced live on 09-17: two PIDs, both with
+`MainWindowHandle = 0`. The stale instances also explained two of the "QVR Pro Client is
+delaying system shutdown" events.
+
+### The watchdog I turned on
+
+The client also logged `Agent disconnected` every ~5 minutes, and the `QvrProAgent` service
+was Stopped/Manual. So I set it to Automatic. The spam stopped, and I called that fixed.
+
+It was a **watchdog**. It relaunches the client through the `qvrpros://` handler whenever an
+instance dies. Kill the clients and three new ones appeared within seconds, all parented to
+`QVRProAgent.exe`, all decoding the same six camera streams: **668 % CPU** (238 + 227 + 203),
+seconds of input lag across the whole machine, and more instances fighting over the socket
+I was trying to free. I'd measured the log noise, not the thing I cared about.
+
+Reverted to Stopped/Manual, QNAP's shipped default: 1 instance, 43 % CPU, zero bind errors.
+Order matters when reverting: stop the watchdog *before* killing the clients. The log noise is
+the correct trade.
+
+### Exit code 0, nothing killed
+
+Next I set up a scheduled task on resume to clear the stale instance. It fired, logged `resume:
+clearing stale QVR instance(s)` / `done`, returned `0`, and the client was still alive.
+
+QVR Pro Client runs **elevated from its own manifest**. No shortcut has the run-as-admin
+bit. A medium-integrity `taskkill` gets "Access is denied", and the process reports blank owner,
+path and command line to an unelevated caller (that's how you spot it). Exit code 0 meant
+"taskkill ran", not "the process died".
+
+Working version:
+
+- Task **`RunLevel Highest`**, triggered on **Power-Troubleshooter Event 1** (the real resume
+  event; see the sleep note in the iGPU entry), `AllowStartIfOnBatteries` because the default
+  refuses to run on battery, which is exactly the lid-close case.
+- The action waits with `ping -n 6 127.0.0.1`, **not** `timeout /t`. `timeout` needs an
+  interactive console and fails outright under Task Scheduler, silently skipping the delay.
+- Verified against a live, healthy client: 1 instance → 0 → clean relaunch, no bind error.
+
+### 09-23: a second failure mode
+
+The resume task worked: old client gone, no bind error. But the fresh client came up with its
+main window **hidden**. It wasn't minimised or off-screen, just `visible=False`, while happily
+streaming all six channels in the background. `ShowWindow(SW_SHOW)` brought back the frame
+but the camera view never rendered, because its GL surfaces were never created while hidden.
+Recovery that works: run the elevated cleanup task by hand (`Start-ScheduledTask "QVR resume
+cleanup"`, callable unelevated), then launch normally.
+
+Root cause still open. My suspect is display geometry changing mid-startup: the client
+recorded the screen as 1670×939, Windows reports 1707×960.
+
+---
+
 ## 📹 Dev Diary — QVR Pro Client writes the NAS password to disk in cleartext
 
 **Date:** 2026-09-20
@@ -490,11 +703,287 @@ Useful side finding: full scans on this box are **CPU-bound, not disk-bound** �
 90–99% idle throughout. Which meant the NVMe firmware flash I'd done the day before had no
 bearing on scan duration, despite being the obvious suspect.
 
+### The day before: a scan I couldn't stop
+
+The first full scan (09-18) pinned the machine: `msmpeng` at **1,106 %**, disk 93.6 % idle.
+`ScanAvgCPULoadFactor` was already 50, but `DisableCpuThrottleOnIdleScans = True` makes
+Defender ignore it. Two things that did **not** work, both measured:
+
+- `Set-MpPreference -DisableCpuThrottleOnIdleScans $false` applied and read back fine; the
+  scan stayed at 1,100 %. **Scan parameters are read once, at scan start.**
+- `Stop-ScheduledTask` put the task back to Ready while `msmpeng` stayed at 1,047 %. The scan
+  lives in the `WinDefend` service and outlives whatever started it. Stopping the service
+  isn't an option with Tamper Protection on.
+
+What worked, 1,020 % → 3.1 % in 20 seconds:
+
+```
+MpCmdRun.exe -Scan -Cancel
+```
+
+Which is also how I learned that `FullScanEndTime` gets written for a *cancelled* scan, and
+the "full scan overdue" nag clears with 16 minutes of coverage.
+
+---
+
+## 🧊 Dev Diary — Boot hangs caused by a BIOS setting for an OS I'd already deleted
+
+**Date:** 2026-09-11 → 2026-09-17
+
+The machine would sometimes hang solid about 2.5 minutes after boot, at the login screen,
+display black, until I held the power button. Kernel-Power 41 with `BugcheckCode = 0` and
+`PowerButtonTimestamp != 0`, and no crash dumps anywhere, because none were configured.
+
+The one consistent correlate: `nvlddmkm` Event 14/153 (NVIDIA display driver faults) within
+~20 s of **every** boot, good or bad.
+
+### Making the next hang leave evidence
+
+These hangs never bugcheck on their own, so step one was to make them produce a dump:
+
+- `CrashOnCtrlScroll = 1` on **both** `kbdhid` and `i8042prt` (USB and the built-in keyboard),
+  so Ctrl + ScrollLock ×2 forces a bugcheck.
+- Kernel dump instead of minidump, **plus a dedicated dump file**. The pagefile was 2 GB
+  system-managed, and Windows stages crash dumps through the pagefile. Setting
+  `CrashDumpEnabled = 2` by raw registry write does **not** resize the pagefile the way the
+  System Properties GUI does, so it would have looked applied and produced nothing.
+  `DedicatedDumpFile` + `DumpFileSize = 8192` bypasses the pagefile entirely.
+
+### Ruling out Fast Startup
+
+Fast Startup was on, the classic suspect for this hang pattern. I turned it off (keeping
+hibernate), and the very first true cold boot **hung anyway**, with the same `nvlddmkm` errors at
+the same ~2.5 min mark. Ruled out. I left it off because it removes a confound.
+
+### The actual cause
+
+Then the user remembered: **the Intel UHD 630 was disabled in the BIOS**, years ago, for
+Pop!_OS dual-boot compatibility. Pop was gone. The machine had been running discrete-only,
+with the GTX 1050 Ti initialising a 4K eDP panel on its own at every boot and carrying every
+power transition. Windows agreed: the iGPU wasn't just disabled in Device Manager, it was
+absent from `Win32_VideoController` altogether.
+
+Switched to **Hybrid Graphics** (Config → Display → Graphics Device):
+
+```
+nvlddmkm 14/153   every boot for 5 days before   ->   0 on every boot since
+Kernel-Power 41   last one: the final discrete-only boot
+```
+
+Six boots later, including two firmware-update reboots: zero display-driver faults, zero dirty
+shutdowns. The evidence that carries the conclusion is the error count going to zero, not
+just the boots succeeding, since the hang was intermittent anyway. The Parsec virtual display
+adapter, my other suspect, was re-enabled throughout, which clears it too.
+
+Cleanup: the BIOS gives the 1050 Ti a different PCI subsystem ID in discrete vs hybrid mode, so
+it left a ghost device node. I removed it by matching `IsPresent = False`, **never by name**.
+The name matched the working GPU too.
+
+### A retraction on the way
+
+At one point I "found" that sleep never stuck: Kernel-Power Event 42 (entering sleep) and
+107 (resume) were always ~1 s apart. That's an artifact. 107 is written on resume using a
+timestamp captured at suspend entry. The real record is **Power-Troubleshooter Event 1**,
+which has explicit `SleepTime` / `WakeTime`: 16-, 20-, even 69-hour sleeps. Sleep had been
+fine for weeks.
+
+---
+
+## 🔥 Dev Diary — 11 of 12 cores, and the cap I shouldn't have set
+
+**Date:** 2026-09-11
+
+The machine felt slow. It wasn't throttling (`% Processor Performance` 110–135 %); every core
+was busy. `vmmemWSL` was at **1,111 %**. The 97–99 % privileged time is just how Hyper-V
+bills guest time to the host, not a driver problem.
+
+Inside WSL it was one process: an MCP code-indexing server (`tokensave serve`) that Claude Code
+starts every session, burning 10–12 cores and 8 GB of RAM at startup against a 4.5 GB SQLite
+database with a 1 GB WAL that had never been checkpointed.
+
+My first move was to cap WSL in `.wslconfig` at 8 CPUs / 12 GB. The user pushed back and they were right.
+`processors=` is a ceiling, not a reservation. The Linux scheduler already scales per
+workload, and `vmmemWSL` only takes host CPU on demand (load 0.17 once the burst settled). A
+static cap throttles *every* workload forever to contain one bad process. Removed. The same
+reasoning later killed a switch to the Balanced power plan.
+
+What stayed in `.wslconfig` is dynamic: `autoMemoryReclaim=gradual` and `sparseVhd=true`.
+**Gotcha:** on WSL 2.7, `autoMemoryReclaim` belongs under `[experimental]`, not `[wsl2]`. It
+sat in the wrong section for five days with WSL printing `Unknown key` at every launch, and
+I'd reported it as verified. My evidence was a low `vmmemWSL` working set on a freshly
+restarted idle VM, and that shows nothing about reclaim. A real test is to measure after
+freeing a large allocation.
+
+The one real I/O fix came later. Defender had three PyCharm folders excluded but not the
+34 GB `ext4.vhdx`, so every WSL read and write went through `WdFilter` against an image
+it can't meaningfully inspect. I excluded the vhdx (found by glob, not a hardcoded package
+name), `vmmemWSL` and `wslservice.exe`. I deliberately did **not** exclude `vmcompute.exe`,
+because that would cover every Hyper-V guest.
+
+---
+
+## 🐢 Dev Diary — WmiPrvSE at 41 % of a core, and why my first probe couldn't find it
+
+**Date:** 2026-09-18
+
+A `WmiPrvSE` burning **41 % of one core, permanently**, about 7.4 hours of CPU per 22 hours.
+To find out who's calling WMI, the `WMI-Activity/Operational` channel is useless: it logs
+provider starts and errors only. The analytic channel has the caller:
+
+```powershell
+wevtutil sl Microsoft-Windows-WMI-Activity/Trace /e:true /q:true
+# ...45 s...
+wevtutil sl Microsoft-Windows-WMI-Activity/Trace /e:false /q:true
+Get-WinEvent -LogName Microsoft-Windows-WMI-Activity/Trace -Oldest   # -Oldest is mandatory
+```
+
+```
+id 24  Executing polling query select * from Win32_Process
+       ClientProcessId = <pia-service>; IntervalMs = 100
+```
+
+**Private Internet Access** re-enumerates the entire process table every 100 ms to drive its
+app-based split tunnel. Don't regex the rendered `Message` to pair events: id 24 has the query
+and the client PID but no provider, and id 12 has the provider and host PID but no client. Correlate
+`$_.Properties[n]` on `GroupOperationId`.
+
+**Left in place on purpose.** Split tunnel is what keeps Parsec, QVR and Tailscale out of
+the VPN. ~3.4 % of a 12-thread machine is a real cost, but the feature is worth more.
+
+The more useful lesson is why the 09-11 sweep missed it. Re-running that exact
+`Get-Process | Sort CPU` a week later put `WmiPrvSE` first by 2.7×. But I'd run it at **2 m 44 s
+of uptime**, when lifetime CPU seconds can't separate anything. And the rate probe I wrote
+to catch sustained consumers measured four hardcoded process names, all of them suspects I
+already had.
+
+> A probe filtered to your suspects can only confirm them. Sweep unfiltered first, then
+> narrow.
+
+---
+
+## 🦊 Dev Diary — Striped image uploads that weren't a graphics bug
+
+**Date:** 2026-09-18
+
+Images uploaded to ChatGPT from Firefox arrived as coloured stripes. The preview before
+sending was fine; the sent image was corrupt. Because the symptom was visual, I spent four
+rounds on the graphics stack: GPU preference for hybrid graphics, forcing acceleration,
+disabling canvas acceleration (which changed the stripe *colours*, a clue I misread), and an
+Intel driver update.
+
+It was `privacy.resistFingerprinting = true` in `prefs.js`. RFP deliberately returns noise
+from canvas readback (`getImageData`/`toDataURL`/`toBlob`) to defeat fingerprinting. ChatGPT
+downscales uploads through a canvas, so the bytes it uploaded really were noise. The preview
+used a plain `<img>`, with no readback involved.
+
+The proof harness was a local page that draws an image to a canvas and calls `getImageData()`
+**twice**:
+
+| condition | self-diff between two reads | mean pixel error |
+|---|---|---|
+| RFP on | **100 % of bytes** | 122 / 255 |
+| RFP off | 0 | 1.4 / 255 |
+| RFP on + per-site canvas allow | 0 | 1.4 / 255 |
+
+No hardware fault makes two consecutive reads of an unchanged canvas differ in every byte.
+That's deliberate randomisation. The same file from ungoogled-chromium was clean, which had
+already ruled out memory.
+
+Fix: a per-site "Extract canvas data" permission, with RFP left on. The prompt had never
+appeared because `privacy.resistFingerprinting.autoDeclineNoUserInputCanvasPrompts` silently
+declines it. Also: force-killing Firefox once dropped the RFP pref from `prefs.js`. Quit it
+normally, and never edit `prefs.js` while it's running.
+
+> A visual symptom isn't a graphics cause. Read the user config before touching drivers, and
+> try a second browser before suspecting hardware.
+
+---
+
+## 💾 Dev Diary — Flashing the NVMe without the vendor's broken boot ISO
+
+**Date:** 2026-09-18
+
+The Crucial P1 was still on its launch firmware, P3CR010. Crucial ships P3CR013 as a bootable
+TinyCore ISO, and its UEFI path **cannot work**: `BOOTX64.EFI` embeds no `fat` or `search`
+module, so it can't even read a FAT32 stick, and `GRUB.CFG` has no `set root` and no `menuentry`.
+It hangs at "Welcome to GRUB!". The legacy path would have worked, but CSM was unavailable
+because Kernel DMA Protection pins the BIOS to UEFI-only, and turning off VT-d for a
+firmware flash is disproportionate.
+
+The firmware isn't on the ISO filesystem anyway. It's inside the initrd:
+
+```bash
+zcat COREPURE.GZ | cpio -idm 'opt/firmware/*'    # -> opt/firmware/P3CR013/1.bin
+```
+
+And Windows can flash NVMe firmware natively. The drive reported two slots, both writable,
+active slot 1, so I flashed the **inactive** slot and kept the old firmware as a fallback:
+
+```powershell
+Get-StorageFirmwareInformation            # check this BEFORE building any boot media
+Update-StorageFirmware -ImagePath .\1.bin -SlotNumber 2
+```
+
+After reboot: `P3CR013`, Healthy, no stornvme/NTFS/WHEA errors, and a `chkdsk /scan` an
+hour later came back clean.
+
+---
+
+## 🧰 Dev Diary — Driver updates by hardware ID, and a maintenance script that had never run
+
+**Date:** 2026-09-17 → 2026-09-18
+
+### Optional updates with useless names
+
+Windows Update offered twenty optional drivers with names like `INTEL - System - 1/1/1970 -
+10.1.1.42`. The Windows Update Agent COM API gives you the hardware IDs:
+
+```powershell
+$s = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
+$s.Search("IsInstalled=0 and Type='Driver'").Updates |
+  select Title, DriverHardwareID, DriverVerDate
+```
+
+Matching on `DriverHardwareID` showed the 1970 one was the driver for the yellow-triangle GNA
+device (`PCI\VEN_8086&DEV_1911`, Problem 28), which had been there forever. I installed that
+plus ME firmware 12.0.93.2331. Afterwards
+`Get-PnpDevice -PresentOnly | ? Status -ne 'OK'` returned **nothing** for the first time.
+
+Skipped on purpose: a "BIOS 1.51" that was already installed, a 2018 Realtek/Dolby/SST audio
+bundle that would have downgraded a working stack, and the **Intel XTU** driver, whose
+`iqvw64e.sys` is a known bring-your-own-vulnerable-driver target. TPM firmware is only
+worth doing deliberately, with BitLocker suspended.
+
+### The maintenance battery
+
+`run-maintenance.ps1` (monthly: `chkdsk /scan` → DISM → `sfc` → ReTrim → `cleanmgr`) had been
+scheduled but never actually run. First real run: 41 minutes, all exit 0, 0 bad sectors,
+4.6 GB reclaimed.
+
+- **DISM before SFC.** SFC repairs *from* the component store.
+- **ReTrim, never defrag**, on QLC NAND.
+- DISM prints `The restore operation completed successfully` whether or not it repaired
+  anything. `dism.log` / `CBS.log` are the only way to tell. (It repaired nothing.)
+- The cleanmgr profile explicitly **deselects the crash-dump handlers**, or the monthly
+  cleanup would delete the very dumps Ctrl+ScrollLock is armed to capture.
+
+Task Scheduler gotchas I hit along the way:
+
+- `schtasks /TR` strips nested double quotes and then parses what was inside them as its own
+  switches: `"Start-MpScan -ScanType FullScan"` became an unknown option `-ScanType`. Make
+  every action a space-free, quote-free `.ps1` path.
+- `schtasks /SD` parses dates in the machine's **short date pattern**. This box says `en-US`
+  but has it overridden to `yyyy-MM-dd`, so both a hardcoded format and a culture guess
+  fail. Use `New-ScheduledTaskTrigger -At <DateTime>` for anything dated.
+- `New-ScheduledTaskTrigger` writes `StartBoundary` in **UTC**. On a UTC+9 machine, check
+  it by parsing back with `.ToLocalTime()`.
+- `DeleteExpiredTaskAfter` never fires unless the trigger also has an `EndBoundary`.
+
 ---
 
 ## 🔁 The pattern
 
-Five separate investigations in this file, and the same shape in every one:
+The same shape shows up again and again in this file:
 
 | tool | reported | reality | what caught it |
 |---|---|---|---|
@@ -503,6 +992,12 @@ Five separate investigations in this file, and the same shape in every one:
 | `manage-bde -status` | `100% Encrypted` | zero protectors, unprotected | `Protection Status` field |
 | `manage-bde -w` | "wiping in progress" | *(true — but no completion logged)* | the **other** event provider |
 | `Win32_SystemDriver` | no RTCore service | driver files on disk | looking at the filesystem |
+| QVR client log | "Agent disconnected" spam stopped | watchdog respawn loop, 668 % CPU | counting processes |
+| resume task (LIMITED) | exit 0, "done" | `taskkill` denied, client alive | instance count before/after |
+| `.wslconfig` | low `vmmemWSL` working set | key in the wrong section, ignored | WSL's own startup warning |
+| DISM | "completed successfully" | printed either way | `dism.log` / `CBS.log` |
+| Kernel-Power 42 → 107 | 1-second sleeps | 16–69 hour sleeps | Power-Troubleshooter Event 1 |
+| battery report | capacity went *up* 9 Wh | fuel-gauge reset | a real discharge relearning it |
 
 In every case the resolution came from a **different measurement**, never from asking the
 same tool more insistently. And in the one case where I measured a physical quantity
