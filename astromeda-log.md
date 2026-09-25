@@ -868,3 +868,133 @@ Three of the four real problems this week were *absences*: a scheduled task that
 registered, a trim that was never run, an elevated shell I already had and didn't know
 about. None of them announced itself, and none would have been caught by watching the
 system more closely — only by checking whether the thing I believed existed actually did.
+
+---
+
+## The lag was an army, and the firmware was five years behind
+
+**Date:** 2026-09-25
+
+My son and I play Minecraft Bedrock on a server this box hosts. He plays from a tablet
+over Wi-Fi to the same mesh satellite the PC is wired to; I play on the PC itself. Lately
+it lagged when we were together at our base, and for him it became unplayable. The
+previous entry had already cleared the network and the host, and a follow-up tuning pass
+had trimmed view distance, switched compression to snappy, unlocked worker threads and
+moved terrain generation from the tablet to the server. The question I started with was
+whether that last change would push the single tick thread over the edge, and whether
+we should undo it.
+
+Wrong question again, though a cheaper one this time.
+
+### Count what is in the world before touching the config
+
+Bedrock simulates the whole world on one thread. Every tuning knob I had already turned
+addresses what the server *sends*; none of them touches what it *ticks*. What it ticks is
+entities, and nobody had counted them.
+
+With zero players online and no ticking areas, the server still held **1,265 loaded
+non-player entities**, all inside one 250 × 280-block patch around the base: 586 drowned,
+305 tridents stuck in the ground, 81 villagers, 73 snow golems, 35 wolves, 32 skeletons.
+Natural spawning is off in that world, so every one of them had been spawned by hand — a
+war, weeks ago, that never ended. Snow golems attack hostile mobs, so 73 golems next to
+586 drowned was a battle running every tick, for days, whether anyone was logged in or
+not. Drowned have the most expensive AI in the game: three-dimensional water pathfinding
+plus ranged combat.
+
+That explained the pattern exactly. Two players in different places tick two small areas
+of terrain. Two players together at the base tick one area containing a thousand entities
+fighting each other. The tick thread had been measured at full saturation with two
+players; it idled at 8% with *nobody* on, which should have been the tell.
+
+⚠️ **Bedrock has no `/tps`, no entity count and no profiler.** The census came from the
+server console: create a scoreboard objective, `scoreboard players set @e[type=drowned]
+… 1`, and read "Set for N entities" from the log. `family=` selectors group by class, and
+`execute as @e[type=…,c=3] at @s run tp @s ~ ~ ~` prints coordinates for the nearest
+three. Clunky, but it turned a guess into a table in ten minutes.
+
+I culled the drowned and the tridents (after a held-save backup), leaving the villagers,
+golems and animals. 1,265 became 374. The tick thread now idles at 1%.
+
+**A correction to the previous entry:** I wrote that "the servers stayed responsive
+throughout" the load matrix. They did — with two players standing away from the base.
+The variable I never varied was what was loaded around the players, and it was the only
+one that mattered. A machine can be instrumented to the bone and still miss the thing
+that is not a resource.
+
+The part that changes the workflow: spawning enormous crowds and letting them fight is,
+my son tells me, the *point*. So "spawn fewer mobs" is not a fix. The fix is that a war
+has to end when you are done with it — one `/kill @e[family=monster]` in chat — and
+that the leftovers (projectiles, drops, orbs) get swept. He is now an operator on both
+servers so he can do that himself. The single-thread ceiling is real and no server on
+any platform ticks one battle across cores; a 5800X core handles a few hundred cheap
+mobs in one place comfortably. It cannot handle a permanent drowned navy.
+
+A few things I looked at and correctly left alone: the world sits on a 9p bind mount of a
+Windows path, which is ~10× slower than ext4 on small-file metadata but only touches the
+LevelDB thread, never the ticker. And the CPU already boosts to 4.66 GHz on a single
+thread, *including inside the WSL2 VM* — measured, not assumed — so the power plan and
+every "dedicated box" argument I was tempted by would have bought nothing. Only
+single-core speed moves this ceiling.
+
+### A BIOS from the month the CPU launched
+
+While checking the clocks I noticed the firmware: **P1.20, October 2020**, the Zen 3
+launch BIOS. Two things follow from that. It predates the fTPM stutter fix (AGESA
+1.2.0.7, 2022), and this box uses the firmware TPM for BitLocker on C:, so the bug that
+freezes the whole system for a second while the TPM writes to SPI flash applied here.
+And it predates the 2023 Secure Boot certificates, which Windows now needs.
+
+The flash cost an afternoon, and the reasons are worth recording because none of them
+were in the manual.
+
+🔴 **Instant Flash could not leave P1.20.** It listed the 5.80 image as suitable, then
+rejected it with "Invalid File!". I downloaded every release for the board and compared
+them: identical board ID throughout, but from 1.50 onward the AMD PSP firmware
+directories sit at different offsets in the image. The flasher baked into P1.20 validates
+against the layout it knows and refuses everything newer. There is no stepping-stone
+version — the very first release after mine already has the new layout. The only path
+is **BIOS Flashback**, the button on the rear I/O that writes the flash with its own
+controller and never involves the running firmware. The manual describes Flashback as a
+recovery feature. From this firmware it was the *only* upgrade path.
+
+🔴 **The USB stick bricked the board.** Not the image — I had verified the download was
+byte-identical to the vendor's file. The first two sticks were the same "Generic Flash
+Disk" model. One refused writes at the controller level (diskpart's `clean` failed with
+access denied; the event log said "cannot zero sectors"). The second passed a full SHA-256
+read-back under Windows and *still* delivered a corrupt image to the Flashback
+controller, which reads the stick with a minimal USB stack, not the OS's. The board would
+not POST. A stick of a different make, full (not quick) FAT32 format, fresh download, and
+Flashback again — and it came up. Flashback recovered its own failure, which is what it is
+for, but I should have insisted on a known-good brand instead of a sacrificial one. A hash
+check under the OS does not prove a stick is safe for firmware.
+
+Smaller traps, in the order they cost me time:
+
+- `shutdown /r /fw` — the "reboot straight into UEFI setup" flag — fails with error 203
+  on this firmware. Plain restart and hammer Del.
+- A stick with no bootloader, selected as a boot device, produces an error screen and a
+  drop back to setup. Instant Flash is a utility *inside* setup (Tool menu), not something
+  you boot.
+- BitLocker's "suspend for N reboots" counts every Windows boot, including the ones you
+  make while failing. Two suspensions were used up by detours and the post-flash boot
+  asked for the recovery key after all. Have it to hand before you start, not in a
+  password manager you need the same machine to open.
+- Windows' PowerShell disk cmdlets could not create a volume on a healthy stick that
+  diskpart plus the old `format` command handled fine. Use the old tools for removable
+  media.
+
+The box now runs P5.80 with the DDR4 profile, fTPM, Secure Boot, SVM and Resizable BAR
+re-enabled, the chipset package updated from a 2025 build to the current one (the PSP
+driver that talks to the fTPM went from 5.25 to 5.40), and the NVIDIA and Windows
+updates that were waiting behind it. The Minecraft servers had to be started by hand
+afterwards — containers stopped deliberately do not auto-start, by design of
+`unless-stopped` — and the CI VM came back on its own.
+
+### What I would tell myself on Monday
+
+Last week's problems were absences. This week's were *presences* nobody had counted: a
+thousand entities in a world, five years of firmware releases between the installed
+version and the current one. Both were visible in ten minutes once I asked "what is
+actually there?" instead of "what is the machine doing?". And the thing that nearly cost
+the motherboard was the one component I had decided did not matter enough to choose
+carefully.
