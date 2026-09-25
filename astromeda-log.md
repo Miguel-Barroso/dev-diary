@@ -936,6 +936,10 @@ thread, *including inside the WSL2 VM* — measured, not assumed — so the powe
 every "dedicated box" argument I was tempted by would have bought nothing. Only
 single-core speed moves this ceiling.
 
+> **Retracted the same evening:** "never the ticker" was wrong. The tick thread does
+> synchronous I/O over that mount, and it was sitting there when the world froze. See
+> [the next entry](#the-migration-that-left-three-pointers-behind).
+
 ### A BIOS from the month the CPU launched
 
 While checking the clocks I noticed the firmware: **P1.20, October 2020**, the Zen 3
@@ -998,3 +1002,184 @@ version and the current one. Both were visible in ten minutes once I asked "what
 actually there?" instead of "what is the machine doing?". And the thing that nearly cost
 the motherboard was the one component I had decided did not matter enough to choose
 carefully.
+
+---
+
+## The migration that left three pointers behind
+
+**Date:** 2026-09-25 (evening) — with one loose end from 2026-09-22
+
+The afternoon's entity cull fixed the constant lag. It did not fix the freezes. My son
+still reported the world stopping dead for a second or two, and so did I, on a wired PC.
+This time I did not tune anything until I could see a freeze happen.
+
+### Measuring a freeze on a server that has no `/tps`
+
+Bedrock has no tick-rate readout, but it has `time query gametime`. It also does **not**
+run catch-up ticks: a tick it misses is gone. So I sent that command once a second from
+the console and diffed the gametime lines in the log. Twenty ticks between samples means
+healthy. Fewer means the world stood still for the wall-clock difference.
+
+The first 17 minutes, with one player at the base, gave two freezes: about 3 s, then about
+1 s. After that, nothing for 9.5 minutes. The tick thread never went above 30% CPU, the
+host sat around 20%, and PSI was zero. That is a stall, not saturation. The one time I
+caught the thread during a freeze, it was in state `D`, blocked in `p9_client_rpc`.
+
+A 40-minute run with both of us online made the case. I sampled the tick thread's kernel
+wait channel ten times a second. In the five seconds before *each* of the two hard freezes
+(≈2 s and ≈2.5 s), it spent 40–80% of its samples in `p9_client_rpc`. Meanwhile the LevelDB
+thread was running at 75–86% and both players were standing still. That is a LevelDB flush,
+with the tick thread doing synchronous file I/O over the 9p mount that joins the container
+to a Windows directory. The afternoon entry said this mount "never touches the ticker".
+It does.
+
+The same run showed a second, different slowdown: 13–16 ticks per second for up to 20 s,
+with the tick thread at 95–104% CPU. It happened when a player flew fast (20–28 blocks/s,
+so fresh chunks loading) or went into a second dense cluster of 100–120 entities. That one
+really is CPU, and it is the single-thread ceiling from the afternoon entry. It did not
+correlate with host CPU (41% mean), disk latency (p95 6 ms) or ping.
+
+⚠️ Two traps in the instrumentation:
+- There are **two threads named `MC_SERVER`**, and only one of them ticks. Anything that
+  picks "the" tick thread by name has to take the one with large `utime`.
+- A collector built on `docker logs --tail` looks dead if you analyse it while it is still
+  running. Check for its own "done" line before you decide it crashed.
+
+### Why the tablet felt worse than the PC
+
+The freezes hit both players equally, because they are server-side. So they did not
+explain why he felt it more than I did. Two things did, both on his side:
+
+- **Rendering.** By early evening there had been a new battle, and the world was back at
+  ~1,280 entities. Within 48 blocks of his player there were 96 non-player entities on
+  average, with a peak of 385. The tablet has to draw all of them. The PC barely notices.
+- **Wi-Fi.** 35 minutes of pings showed zero loss, but 37 spikes over 20 ms and 10 over
+  50 ms (max 167 ms). The wired PC had none. Through Docker Desktop's UDP proxy, RakNet
+  round trips stayed under 1 ms, so the host was not adding any of this.
+
+The fixes for that are on the client: render distance 6–8 on the tablet, fancy graphics
+off, and the after-battle sweep. None of them is a server setting.
+
+### The move off 9p
+
+I had staged the move in the early evening. I created a Docker named volume, warm-filled it
+while the server was running (3.7 GB in 81 s), and wrote a cutover script that refuses to
+run while anyone is online. The cutover itself ran later that night from a Claude Code
+session on the Windows side, and it widened the scope sensibly: Big Earth sits on the same
+kind of mount, so **both** servers moved. After stopping both, a delta sync copied 383 MB
+for Rhen's World and 446 MB for a new Big Earth volume, and the file lists matched. `/data`
+is now ext4 inside Docker's VM. The old `N:` directories are frozen rollback copies.
+Nothing reads them any more, and nothing should write to them.
+
+⚠️ **A named volume lives inside Docker Desktop's disk image**, so it goes with that image
+if Docker Desktop is ever reset. After the move, a world that exists nowhere else has to be
+backed up through the container. That is also how I found the next problem.
+
+**Not yet proven:** I have not repeated the freeze measurement since the cutover. The
+mechanism fits, and the ext4 volume removes it. The next play session with the sampler
+running will settle it, and I will record the result here whichever way it goes.
+
+### Three pointers still aimed at the drive I emptied
+
+The NVMe entry from 11 September moved Docker, WSL and the worlds off `D:`. It made no
+mention of what still *pointed* at `D:`. Three things did, and none of them reported an
+error:
+
+🔴 **The nightly world backup had failed every night from 11 to 25 September.** The
+scheduled task still ran the scripts under `D:\Docker`, which no longer existed. It
+failed silently, with nothing in the logs I actually read. That was two weeks with no
+backup of a world my son plays in every day. It would have kept failing after the volume
+move anyway, because the scripts read world files straight from disk. The rewrite:
+- The world is pulled out with `docker cp` from the running container, between
+  `save hold` and `save resume`.
+- The task was re-registered with an **S4U** principal. It runs without me logged in and
+  stores no password.
+- There is change detection. The script hashes a tar stream of the world plus its config
+  files, with mtimes and ownership zeroed, and skips the zip when the hash matches the
+  last backup. `level.dat` is rewritten on every save hold/resume, even on an idle world,
+  but I checked that the content hash stays the same across that cycle. Without zeroing
+  the metadata, every night would count as a change.
+
+Deduplication then showed how much the old scheme had been duplicating. Most nights
+nobody played, and each of those produced a full copy in OneDrive. Comparing every zip by
+entry names, sizes and CRC32, and keeping the first zip of each unchanged run, took the
+folder from **319 zips to 224**. That removed 95 files, **about 78 GB**. The full list of
+deletions is logged beside the backups. Fifteen files could not be checked: fourteen were
+OneDrive placeholders with no local copy, and one zip from May has no end-of-archive
+record, which means a truncated upload that may never have been restorable.
+
+🔴 **Defender's exclusions still named the `D:` paths.** For two weeks, none of the new
+locations for Docker, WSL, Hyper-V or the Steam library were excluded from real-time
+scanning. I never measured what that cost, so I can't say it was slowing anything. The agent
+proposed the new exclusions (`N:\Docker`, `N:\WSL`, `N:\HyperV`, `N:\SteamLibrary`) and was
+refused permission to apply them itself. That was the right call: weakening the
+antivirus is something I should type myself, and I did.
+
+🔴 **The WSL distro's disk was owned by the wrong account.** On 22 September, Ubuntu
+stopped starting with `Wsl/Service/CreateInstance/MountDisk/HCS/E_ACCESSDENIED`. It looks
+like a locked or corrupt disk, and it is neither. Every time a distro starts, the host
+compute service rewrites the VHDX's ACL to add the new utility VM's SID. That needs
+`WRITE_DAC`, which the file's owner has implicitly. The files re-registered on `N:` during
+the move were owned by `BUILTIN\Administrators`, not me, and the inherited "Authenticated
+Users: Modify" grant does not include `WRITE_DAC`. The fix was
+`icacls N:\WSL /setowner ASTROMEDA\MB /T /C` from an elevated shell. Granting the Virtual
+Machines group full control does nothing, because the failure is in writing the ACL, not
+in the access check. This is **the same bug** that took down Docker Desktop's disk after
+an update in August. At the time I wrote it off as a one-off. It is a pattern: any VHDX
+created from an elevated context on this machine will do it.
+
+**Lesson:** a migration checklist needs a step for what points at the old location, not
+just for what lives there. Scheduled tasks, AV exclusions, file ownership, junctions. None
+of these fail loudly, and all of them fail *later*.
+
+### Host tuning, and where it contradicts my own measurement
+
+The same Windows-side pass tuned the host for everything running on it at once: Plex,
+Docker, the two servers, occasional Steam and the CI VM.
+
+| Change | Why |
+|---|---|
+| WSL memory capped at 24 GB | `memory=0` is not "unlimited". WSL ignores it and falls back to 50% of RAM (32 GB). With CI holding 16 GB and Windows ~10 GB, that left ~6 GB headroom at peak. |
+| Power plan → High performance | see below |
+| Xbox Game DVR background capture off | records the GPU continuously for nothing |
+| Green Ethernet off on the NIC | power saving on a desktop's wired link |
+| NVIDIA Broadcast, Logitech updater, Edge removed from startup | Broadcast holds GPU resources whenever it runs |
+| `docker image prune -a` | 3.06 GB of unused images |
+| "WAN Miniport (IP)" Code 56 removed and rescanned | a RAS pseudo-device, typically broken by VPN client installs; Windows recreated it clean |
+
+⚠️ **High performance contradicts this afternoon's entry.** Then I measured 4.66 GHz on
+one thread under Balanced, *inside WSL2 as well*, and wrote that a power-plan change
+would buy nothing. That is still true for single-thread boost. What High performance
+changes is how quickly idle cores wake up and park, and I have no measurement either way.
+I have left it on, but I am counting it as untested, not as an optimisation.
+
+Considered and deliberately left alone:
+- **Memory integrity (HVCI)** stays on. It costs a few percent in games and some VM-exit
+  overhead, and it is a real security boundary. That trade is not worth a few frames.
+- **The 2.5 GbE NIC negotiates at 1 Gbps.** That is the switch or the cable, not the host.
+- **NetherNet.** Every server start now prints a "TRANSPORT TYPE ERROR" block saying
+  Mojang's WebRTC-based transport is the only one supported. It isn't, yet: no
+  `transport` line means RakNet on UDP 19132, and the tablet connects fine. But this
+  whole setup assumes RakNet: the port mapping, the LAN discovery relay, the tablet. A
+  switch needs TCP 19132 published plus a UDP range. That has to be planned and tested with
+  the tablet before an automatic image update pulls a build that enforces it.
+
+### A smaller trap: the blank launcher
+
+After the BIOS flash, eight reboots, a new NVIDIA driver and a Windows preview update, the
+Minecraft launcher took 3 min 15 s to start (normally 4–7 s) and showed a blank page. Its
+Chromium log shows a `--type=gpu-process … --use-gl=disabled` relaunch, which looks like
+the obvious suspect. It is not: that line is in nine of my last ten launcher logs,
+including all the healthy ones. So were 176 GPU `LiveKernelEvent` reports, which all fall
+inside the reboot storm, with none after the last boot. If the page is blank, relaunch
+once. If it happens again, delete `.minecraft\webcache2`. Bedrock itself does not need the
+launcher:
+`explorer.exe shell:AppsFolder\Microsoft.MinecraftUWP_8wekyb3d8bbwe!App`.
+
+### What the day actually taught
+
+I wrote two confident sentences this afternoon: the 9p mount never touches the ticker,
+and the power plan is irrelevant. By night the first had been disproved by measurement,
+and the second had been set aside without a measurement either way. The first is the kind
+of correction I want in this log. The second is the kind I want to avoid, so it is marked
+here until I have a number for it.
