@@ -1183,3 +1183,44 @@ and the power plan is irrelevant. By night the first had been disproved by measu
 and the second had been set aside without a measurement either way. The first is the kind
 of correction I want in this log. The second is the kind I want to avoid, so it is marked
 here until I have a number for it.
+
+---
+
+## A second library on D:, and a preview that could not fail (2026-10-11 → 13)
+
+The drone footage from the Potensic Atom SE now lives the way the Insta360 library does: master on
+`D:\AtomSE`, `YYYY-MM-DD_Region_Location\{01_Raw,02_Projects,03_Exports,04_Thumbnails}`, a hot folder at
+`N:\AtomSE\Active`, a `_Manifest\transfer-manifest.csv` with SHA-256 for every file, and a nightly
+`robocopy /MIR` to a QNAP share. The camera has no GPS, so the dates come from the clips' `TrackCreateDate`
+and the place names from sampled frames; they are guesses until I go through them.
+
+The source was the QNAP's `Atom SE` folder: 115 files, 100 GB, of which the top level was a partial second
+copy of its own `100DRONE` subfolder — 66 unique files, 60.4 GB, and each half had proxies the other was
+missing. It came over by `scp` from the Mac's SMB mount through Tailscale, hashed on the way, and `Get-FileHash`
+here confirmed 66/66. A drone card on 10-13 added 15 files (two more shoots) through a small `card_ingest.py`
+that copies, verifies and appends to the manifest in one go. 81 files, 64.2 GB, seven shoots.
+
+### Doing things inside my session from SSH
+
+An SSH session on this box cannot see the Credential Manager, so anything that needs the stored NAS login
+has to run inside the interactive session. The pattern that works: `Register-ScheduledTask` with
+`New-ScheduledTaskPrincipal -LogonType Interactive`, `Start-ScheduledTask`, poll `State`, read the log,
+`Unregister-ScheduledTask`. `schtasks /create /xml` from SSH was a dead end — "unable to switch the
+encoding" no matter how the file was declared. The cmdlets do not care.
+
+That is how the Insta360 mirror's week of silent `exit 17` was diagnosed: inside the session,
+`\\192.168.1.9\Insta360` was *Access is denied* while the hostname path as the read-only account worked,
+which put the fault on the NAS's directory ACLs rather than on anything here. The NAS log has the rest.
+
+### The preview that could not fail
+
+`atomse-mirror.ps1` is the Insta360 script with paths changed and one guard loosened: an empty destination
+is allowed (first seed), a destination with unrelated content is not. `-Preview` (`/L`) planned 83 files and
+64 GB with zero errors. The real run failed on every directory with `ERROR 112 (0x70)` — disk full — against
+a share with terabytes free. A `/L` run never sends a write, so a per-user quota on the NAS is invisible to it.
+Worth remembering: the preview proves the read side and the path; only the first real run proves the write
+side. After the quota was lifted the seed took 14 minutes at ~164 MB/s on the 1 GbE link, rc=3.
+
+`\AtomSE NAS mirror` is registered daily at 02:00, interactive as MB, `StartWhenAvailable`, 12 h limit,
+half an hour after the Insta360 one so they never share the NAS. Both logs are files in `C:\ProgramData`
+and nothing reads them but me — the Insta360 one proved that by failing for eight nights unnoticed.

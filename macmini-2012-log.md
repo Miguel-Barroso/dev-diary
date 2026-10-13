@@ -931,3 +931,40 @@ ERROR: /etc/smokeping/config.d/pathnames, line 1: variable already defined
 smokeping` returned 0 and left the service `active` with that error outstanding — the same "reload
 tells you nothing" problem that opened this entry, showing up again at the end of it. Check the config,
 then reload; the reload's own exit status is not the confirmation it appears to be.
+---
+
+## 2026-10-13 — The DNS box becomes a UPS client, and the bit that brings it back
+
+This machine shares the APC Back-UPS RS 550S with the QNAP and it is the house's resolver (AdGuard Home on
+53), so it has to shut down before the battery does and come back on its own when power returns. The QNAP
+is the NUT master — QTS "network UPS master" writes `ACCEPT` lines for 192.168.1.19 and .66 into its
+`upsd.conf` — and `printf 'LIST UPS\n' | nc 192.168.1.9 3493` answered `qnapups` before anything was installed.
+
+### The client
+
+`nut-client` 2.7.4, `nut.conf` `MODE=netclient`, and in `upsmon.conf` a single `MONITOR
+qnapups@192.168.1.9 1 … slave` with QNAP's documented client account, `SHUTDOWNCMD "/sbin/shutdown -h +0"`,
+`POLLFREQ 5`, `DEADTIME 15`. No `upssched` timer: the box powers down on **OB+LB** (10 % or 120 s left) or on
+an FSD from the master, and not before. The Delta 2 upstream causes brief transfers several times a day that
+the APC bridges; a five-minute timer would be fine for the NAS and pointless here, and the CatCam stream
+should not drop for a relay click.
+
+Ubuntu's client-only package has a quirk: `/run/nut` is created by `nut-server`, which is not installed, so
+`upsmon` logs `fopen /run/nut/upsmon.pid: No such file` and systemd reports "supervising process … which is
+not our child" — the service shows active but is not actually tracked. A drop-in with `RuntimeDirectory=nut`
+and `RuntimeDirectoryPreserve=yes` fixes it; after that `MainPID` is the real daemon. Checks that mean
+something: `upsc qnapups@192.168.1.9 ups.status` (OL), `upsc -c qnapups@192.168.1.9` listing this host, and
+the journal.
+
+### The bit that brings it back
+
+When I plugged the shut-down mini into the UPS last week it chimed and booted, which is the SMC's "restart
+after power failure" already set from the macOS days. On Linux the same thing is readable in the HM77 PCH:
+`setpci -s 00:1f.0 0xa4.b` gave `0x08`, bit 0 (`AFTERG3_EN`) clear = power on when AC returns. A clean Linux
+shutdown can set that bit on these minis, so it is now re-cleared with a mask at boot and on the way down
+(`macmini-autopoweron.service`, `setpci -s 00:1f.0 0xa4.b=00:01` as `ExecStart` and `ExecStop`) and once more
+from `/lib/systemd/system-shutdown/`, which runs after every unit has stopped.
+
+What is not done: nobody has pulled the APC's plug. The whole chain — QTS auto-protection, this client going
+to OB, the chime on return — is configured and verified piecewise, not end to end. That is a thirty-second
+test on a quiet afternoon, and until it is run this entry describes intent.

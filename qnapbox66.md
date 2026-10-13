@@ -1237,3 +1237,156 @@ task.
 credential in a logfile persists, gets backed up, and syncs. Any service account that a
 desktop client authenticates with should be scoped to what that client actually needs —
 because you should assume the client will write it down somewhere.
+
+---
+
+# Pass 1 relief, a scoped account, and the outage that ran the experiment for me (2026-09-26)
+
+Two things happened on the same afternoon, so they share an entry.
+
+## What the watcher had already seen
+
+The weekly check had flagged a RECURRENCE on 2026-09-21 — an improper shutdown at 2026-09-20 12:44:45, four
+days after the new PSU — and I never saw it. `display notification` from a LaunchAgent is dropped without
+Notification Center permission, and the 09-16 "CLEAN" verdict had come from a run whose event-log section
+died on the Xcode licence prompt and was counted as zero findings. Recorded as an **unclean shutdown of
+undetermined cause**: no pstore dump was written, which is consistent with a power loss but does not prove
+one. Decision: the PSU work stands, and investigation resumes only if the watcher reports another event.
+
+The watcher now runs daily at 10:00, alerts with a modal dialog instead of a notification (detached, gives up
+after 12 h, `AbandonProcessGroup` so launchd does not reap it), and a section that fails is INCONCLUSIVE with
+exit 2, never CLEAN. Tested through `launchctl kickstart`: dialog shown and closed, logged in `alerts.log`.
+
+## The outage
+
+Around 17:24 JST the neighbourhood lost power briefly (lightning, probably). Pi 3 and Pi 4 on plain mains
+rebooted at 17:25, Astromeda at 17:28. The NAS, behind the EcoFlow Delta 2, rebooted at 17:27:55 with the
+usual three-line cluster. The Mac mini, **on the same EcoFlow**, stayed up (15 days). The EcoFlow carried one
+load through and not the other; whether that is PSU hold-up versus transfer time or something downstream of
+the NAS's outlet, "the NAS is on a battery" is not protection for this NAS. Filed, not acted on.
+
+Collateral: Plex's container on Astromeda did not come back because its CIFS volume could not mount while the
+NAS was still down (exit 255; restart policies do not cover volume-mount failures). Started by hand at 17:45.
+The Bedrock servers and Watchtower came up on their own.
+
+## Pass 1: what changed
+
+Baseline at 17:09, before the outage: load 6.2, CPU 33% usr / 41% sys / 16% idle / 8% io, MemAvailable
+3.8 GB, 1.6 GB in swap with zero swap-in/out over 60 s, md1 40% busy, dm-crypt device 40% busy.
+
+- Antivirus job "Downloads": Monday 00:00 → 01:00, and `/Download/@Recycle` excluded. The last run scanned
+  540 files / 134 GB in 742 minutes; all of it was deleted torrents sitting in the recycle bin (174 GB).
+- Media library: `homes` and `Multimedia` removed as content sources (`mymediadbcmd delfolder`, path without a
+  trailing slash or it silently does nothing). Multimedia Console itself stays: Cayin Media Viewer depends on
+  it, and Cayin is a QVR Pro dependency.
+- SMB access logging was already off in QuLog (`SAMBA = 0`). Qboost's schedule file is empty and the 01:00
+  `flush_memory.sh` in cron is a QTS no-op. Nothing to change on either.
+- Containers `adguardhome`, `caddy`, `vaultwarden` and their images removed; Container Station stays because
+  `qvrpro_all` runs in it. The `vaultwarden` share is archived to `8TB-QNAP-BCKP/vaultwarden-retired-2026`
+  (`diff -r` identical, 274 files); the share itself is still to be removed. HBS `8TB_backup` never included it.
+- New non-admin user `astromeda`: RW on Download, Multimedia and a new share `Insta360` that points at the
+  existing `homes/Miguel/Creatives/Videos/Insta360`; RO on IT and 8TB-QNAP-BCKP; no `homes`. That tree is now
+  owned by `astromeda`. Astromeda's saved credential for 192.168.1.9 went from `admin` to it inside MB's own
+  session (a one-shot interactive scheduled task, because `cmdkey` over SSH cannot reach that Credential
+  Manager). Verified from inside the session: five drives reconnected, Insta360 writable, IT and Z: refuse
+  writes, `homes` denied.
+- The mirror script targets the new share and excludes `@Recently-Snapshot` and `@Recycle`. QTS creates the
+  snapshot directory at every share root, and the first `/L` preview showed `/MIR` trying to delete read-only
+  snapshot links (ERROR 59, retry loop). Under the old path that directory sat at the `homes` root, out of scope.
+- Plex maintenance window 03:00–05:00 (was 02:00–05:00); its task features untouched. Ends before Monday's
+  05:00 HBS run.
+- Time Machine on the Mac: daily since yesterday; sticky exclusions for DerivedData and two `node_modules`.
+  `Docker.raw` was already excluded, which means the supabase volumes on the Mac are not in Time Machine.
+
+Same evening, follow-ups: snapshot retention set to 1 in the UI, and the pool went from 85.1% to 77.7%
+allocated — about 1.06 TB back, measured, not estimated. The `vaultwarden` share and folder removed in the UI;
+the manual HBS job `Vaultwarden_backup` still points at it and can go too. The netcup pulls were never involved:
+they land in `IT/Netcup/vault-backups` (daily SQLite dumps) and `IT/Netcup/site-backups`. QVR Pro Client works
+with the scoped QVRPro login; engawa1 and toilet1 were down after the outage, as they tend to be.
+
+I would rather use `multi` than a new account whose password I never typed, so `multi` got the same scoped
+grants (RO IT and 8TB, RW Insta360; it already had Download and Multimedia). The Credential Manager switch
+itself has to happen in my own session with the password typed in — a helper that prompts for it sits in
+`C:\ProgramData\insta360-mirror\switch-nas-cred-multi.ps1`. The switch was done on 09-27 at 15:08; the mirror ran
+under `multi` straight after, and the `astromeda` account is deleted from the NAS and every share list. Smart Fan thresholds still to do in Control Panel > Hardware.
+
+Pending over the next days: the after-sample once the RAID resync from the outage finishes, Monday's antivirus
+duration, Time Machine spacing, temperatures, and whether anything re-adds media content sources.
+
+Next morning (09-27): the daily run at 10:00 alarmed again on the same two events, which is correct by the
+old contract and useless in practice — a daily check would re-alarm every day until the next reboot. Added an
+"acknowledged up to" marker (`qnap-snapshots/.psu-watch-since`, an epoch): events at or before it are printed
+as context, only newer ones alarm. Set to 2026-09-26 23:00 JST, after that boot's resync finished. A manual run
+then reports CLEAN. The 01:30 mirror ran under the scoped account (rc 2, extras only). First Sunday sample at
+11:08 with Time Machine mid-backup: load 3.4–4.0, CPU 25% usr / 27% sys / 27% idle / 21% io, dm-crypt 84% busy
+from the backup, MemAvailable 3.7 GB, ~11 MB/min swapping out under that load, disks 42–44 °C at 2311 rpm.
+
+---
+
+# A share that passed its preview, a mirror that had been dead for a week, and a UPS that did its job (2026-10-11 → 14)
+
+Three days that started with a drone card that would not mount and ended with two nightly mirrors, a UPS
+client on the Mac mini, and a quota I did not know I had enabled. The card itself is in the MacBook log; this
+is the NAS side.
+
+## The mirror that had been dead for eight nights
+
+While mapping how the Insta360 mirror reaches this box, the log on Astromeda showed every run since
+**2026-10-06** ending in `ABORT destination \\192.168.1.9\Insta360 does not contain the mirror` (exit 17),
+and the three nights before that starting and never finishing. Nothing had told me. The mirror only writes
+`mirror.log`; the checksum job's weekly all-clear mail covers the checksum job and nothing else.
+
+The share lists were fine: `multi` in `write list` and `valid users`, and `smbstatus` showed its session
+connected. From inside my own Windows session (a one-shot `Register-ScheduledTask -LogonType Interactive`,
+the only way to use that session's Credential Manager from SSH) `Test-Path \\192.168.1.9\Insta360` threw
+*Access is denied* while `\\QNAPBOX66\Insta360` as `checksum_user` listed seven items. The difference was on
+disk, not in Samba: the 2026-10-05 Advanced Folder Permissions switch turned the volume's ACLs on, and the
+parents `homes/Miguel`, `Creatives`, `Videos` carry `user:checksum_user:r-x` (from the IT/Netcup work) and
+nothing for `multi`. The share root itself had `multi:rwx`; it just could not be walked to.
+
+Fix, which I ran myself: `setfacl -m u:multi:--x` on the three parents. Traverse only, no listing. A
+`-Preview` run straight after: 321 files, 413.65 GB, all identical, nothing to copy. The lesson is not the
+ACL; it is that a backup that fails by writing a line to a file on another machine is not monitored. That
+goes on the list.
+
+## The drone share, and the quota that came with it
+
+`AtomSE` is the second share of the Insta360 kind: `homes/Miguel/Creatives/Videos/AtomSE`, `multi` RW,
+`checksum_user` RO, guest denied, recycle bin off (the toggle was greyed out, but `smb.conf` says `no`).
+The folder was created with the same ownership and inherited ACLs as the Insta360 one before the share
+pointed at it.
+
+The first seed from Astromeda failed on every `mkdir` with robocopy `ERROR 112 — not enough space on the
+disk`, with 2.8 TB free. The `/L` preview had passed, because a preview never asks the server to write.
+`repquota` had the answer: `multi` was `+-` over quota, 433 GB used against a 128 GiB hard limit, grace
+expiring in four days. `/etc/config/usr_quota.conf` had `User Enable = TRUE` with a 128 GiB default, and
+its mtime matched the minutes I spent in the shared-folder dialog. I never set a quota on purpose; the
+feature is on now, so **every new user gets 128 GiB unless I say otherwise**. `multi` and `QVRPro` are
+Unlimited. Had I not been seeding that evening, the Insta360 mirror would have started dying again at
+01:30 for a second reason, with the same one-line log entry.
+
+Re-seeded: 83 files, 64.18 GB, 14 minutes at ~164 MB/s. Hashed from the Mac over SMB (never on this CPU):
+81/81 match. The old `Atom SE` folder — 100 GB, of which 46.6 GB were a second copy of the other half —
+went to the recycle bin from the Mac's mount. That bin now holds ~328 GB across `Creatives` and `Work`,
+and the pool gets none of it back until I empty it.
+
+## The brownout that was not one
+
+Three "Detected UPS power loss … / UPS power restored. Canceled …" pairs: 10-12 07:43, 10-13 10:27 and
+14:02, each about nine seconds apart in the log — which is the poll interval, not the event. The APC
+reports `input.transfer.reason: input voltage out of range` at 99–101 V against an 82 V transfer point, so
+sensitivity is not it. The NAS never rebooted, `md1` never resynced, no disk or thermal lines. Astromeda
+on wall power, the Mac mini on the same APC, the Pis: nothing at either time. Not the mains, then, and not
+the new PSU. The APC's input is the Delta 2's AC output, and the Delta 2 holds a 50 % reserve it tops up
+from AC whenever it dips below — each start or stop of that charging is an inverter-to-passthrough relay
+transfer the APC sees as a gap. High-draw appliances are ruled out: nothing was on during the events, and
+the washing machine, vacuum and kettle have all run since with no entry.
+
+Decision: live with it. The APC bridges every one and that is what it is for. QTS is now in
+**auto-protection** mode after five minutes (unmount and wait, rather than power off) with **network UPS
+master** on for the Mac mini and Astromeda. From here on a "power loss / cancelled" pair is noise; an actual
+shutdown or a long on-battery stretch is the signal.
+
+Separate and unresolved: LAN stalls on 10-11 ~21:40 and 10-12 ~23:00 with no UPS event, where this box's
+`igb`, the Mac mini's `tg3` and Astromeda's NIC all logged transmit timeouts at once and the catcam Pi
+rebooted on its Wi-Fi watchdog. That is the switch or the router, and it waits for the next occurrence.

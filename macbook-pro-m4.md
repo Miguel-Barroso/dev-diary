@@ -1024,3 +1024,30 @@ netstat -an | grep LISTEN | grep '\.22 '   # no output
 
 Two controls, independent, and neither one is now the only thing standing between this laptop and the
 rest of the mesh. That's the shape I want for the box that holds every key.
+---
+
+# A reader that was not broken, and a card that was not seated (2026-10-11 → 13)
+
+A drone microSD in the Anker Prime dock's card slot showed up nowhere. The reader itself was there: a
+Genesys Logic `05e3:0764` "USB Storage" with two SCSI LUNs — one per slot — both reporting no media, so
+`diskutil` had nothing to list. The question was whether the reader had wedged or the card was not making
+contact, and that is answerable from the keyboard.
+
+Two resets, two kinds. First a `libusb_reset_device` through `pyusb` in a throwaway venv (brew's libusb,
+the kernel driver does not need detaching for a device-level reset): the device dropped off and re-enumerated
+with a new registry ID, both LUNs still empty. Then the hard one: `uhubctl` showed the dock's internal VIA
+VL822 hub advertising per-port power switching, with the reader alone on port 3 and the 2.5GbE adapter — the
+QNAP's path — on port 4. `uhubctl -l 1-2.4.2 -p 3 -a cycle` cut VBUS to the reader only; it came back a
+third time, still empty, and `en8` and all five SMB mounts never noticed. Two clean resets with the same
+answer means the software side is exhausted, and I stopped. Two days later, reseated with a click: mounted
+instantly. `uhubctl` stays; the venv does not.
+
+The card held five clips from August, all new by hash. They went to the drone library on Astromeda through
+`~/Development/atomse_migrate/card_ingest.py` (copy, verify, record), and the card was reformatted exFAT with
+its old label and an MBR, the way the drone had it, and left mounted. The reader's symptom is now in the
+notes as a seating problem, not a dock problem, so nobody resets it next time.
+
+Elsewhere in that folder: `hash_nas.py` hashed the QNAP's old drone folder over SMB from here (107 GB at
+~99 MB/s, never on the NAS's CPU), `plan.py` turned 115 files into 66 unique ones, `frames.py` made contact
+sheets from the `.LRV` proxies to put place names on shoots the camera never geotagged, and
+`verify_backup.py` is the one to re-run after the nightly mirror if anything ever looks off.
