@@ -1,0 +1,1442 @@
+# QNAP NAS — Vaultwarden Self-Hosted Password Manager
+
+**Date:** 2026-03-17
+**Host:** QNAP TS-453 Pro (qnapbox66)
+**Status:** ✅ Running
+
+---
+
+## Background
+
+1Password was getting too expensive for personal use. The core features needed were:
+
+- Sync across multiple devices (Android, macOS, Windows)
+- Password sharing with wife (shared business credentials)
+- TOTP/2FA code generation inside the password manager
+- Reliable backup and redundancy
+
+After researching open source alternatives, **Vaultwarden** was chosen — a lightweight, unofficial Bitwarden-compatible server written in Rust. It is self-hostable, unlocks all premium features (including TOTP) for free, and the official Bitwarden clients connect to it seamlessly.
+
+The QNAP TS-453 Pro was the natural choice for hosting due to its RAID 10 configuration, providing both redundancy and good read performance. Data is stored on the main volume at `/share/CE_CACHEDEV1_DATA`.
+
+---
+
+## Architecture
+
+```
+Devices (Android / macOS / Windows)
+          ↓ Tailscale (WireGuard encrypted)
+QNAP TS-453 Pro — Container Station
+  ├── vaultwarden   (Vaultwarden server, port 80 internally)
+  └── caddy         (Reverse proxy + SSL termination, port 443)
+          ↓ DNS-01 challenge (no public exposure needed)
+    vault.miguelbarroso.com  →  QNAP Tailscale IP
+```
+
+The QNAP firewall only allows LAN and Tailscale connections — no public internet exposure. SSL is handled via Let's Encrypt DNS-01 challenge through the Cloudflare API, meaning the server never needs to be publicly reachable to obtain or renew certificates.
+
+---
+
+## Prerequisites
+
+- QNAP NAS with Container Station installed
+- Tailscale installed and running on the QNAP
+- Domain managed by Cloudflare (in this case `miguelbarroso.com`)
+- SSH access to the QNAP
+
+---
+
+## Step 1 — Cloudflare: Create API Token
+
+1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Go to **My Profile → API Tokens → Create Token**
+3. Use the **"Edit zone DNS"** template
+4. Scope it to `miguelbarroso.com` only
+5. Save the token securely — you will need it in the compose file
+
+---
+
+## Step 2 — Cloudflare: Add DNS Record
+
+1. Go to your domain in the Cloudflare dashboard
+2. Navigate to **DNS → Records → Add record**
+3. Add an **A record**:
+   - Name: `vault`
+   - Value: your QNAP's Tailscale IP (e.g. `100.x.x.x`)
+   - Proxy: **DNS only** (grey cloud — do NOT proxy, Cloudflare cannot proxy a Tailscale IP)
+
+---
+
+## Step 3 — QNAP: Create Directory Structure
+
+SSH into the QNAP and create the required directories and Caddyfile:
+
+```bash
+ssh admin@<qnap-lan-ip>
+
+mkdir -p /share/CE_CACHEDEV1_DATA/vaultwarden/data
+mkdir -p /share/CE_CACHEDEV1_DATA/vaultwarden/caddy/data
+
+cat > /share/CE_CACHEDEV1_DATA/vaultwarden/caddy/Caddyfile << 'EOF'
+vault.miguelbarroso.com {
+    reverse_proxy vaultwarden:80
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+}
+EOF
+```
+
+Verify the Caddyfile:
+
+```bash
+cat /share/CE_CACHEDEV1_DATA/vaultwarden/caddy/Caddyfile
+```
+
+---
+
+## Step 4 — Container Station: Deploy the Application
+
+1. Open **Container Station** in the QNAP web UI
+2. Click **Create → Create Application**
+3. Paste the following docker-compose YAML, replacing `your_cf_token_here` with your actual Cloudflare API token.
+
+> ⚠️ **This is the original deployment as it happened — kept as a faithful record.** The token sitting inline in the compose YAML is exactly the anti-pattern I had to fix two months later. See the **"Caddy Failure, Cloudflare Token Cleanup, and Container Hardening"** entry further down for how I moved the token into an `.env` file. If you're following this guide today, jump to that section first and use `env_file` from the start.
+
+```yaml
+version: '3'
+
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    volumes:
+      - /share/CE_CACHEDEV1_DATA/vaultwarden/data:/data
+    environment:
+      - DOMAIN=https://vault.miguelbarroso.com
+      - SIGNUPS_ALLOWED=true
+    restart: unless-stopped
+
+  caddy:
+    image: serfriz/caddy-cloudflare:latest
+    container_name: caddy
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    ports:
+      - "443:443"
+    volumes:
+      - /share/CE_CACHEDEV1_DATA/vaultwarden/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - /share/CE_CACHEDEV1_DATA/vaultwarden/caddy/data:/data
+    environment:
+      - CLOUDFLARE_API_TOKEN=your_cf_token_here
+    depends_on:
+      - vaultwarden
+    restart: unless-stopped
+```
+
+> **Note:** The explicit `dns` entries (1.1.1.1 / 8.8.8.8) on the caddy service are required because QNAP's internal Docker DNS resolver does not reliably resolve external hostnames inside containers, which would otherwise prevent Caddy from reaching Let's Encrypt.
+
+4. Click **Deploy** and watch the logs. Caddy will perform the DNS-01 challenge and obtain a Let's Encrypt certificate automatically. Look for:
+
+```
+certificate obtained successfully — identifier: vault.miguelbarroso.com
+```
+
+This typically takes 30–60 seconds.
+
+---
+
+## Step 5 — Initial Vaultwarden Setup
+
+1. Open `https://vault.miguelbarroso.com` from any Tailscale-connected device
+2. Create your admin account
+3. Create your wife's account
+4. Once both accounts exist, **lock down signups** by editing the compose YAML and setting:
+   ```
+   SIGNUPS_ALLOWED=false
+   ```
+   Then redeploy the application.
+
+---
+
+## Step 6 — Sharing Setup (Organization)
+
+To share a subset of passwords (e.g. business credentials):
+
+1. In the Vaultwarden web vault, go to **Organizations → New Organisation**
+2. Create the organisation (free on Vaultwarden, no limits)
+3. Invite your wife via her email
+4. Create a **Collection** inside the organisation for shared passwords
+5. Move relevant items into the shared collection
+
+Both users keep their own private vaults and additionally have access to the shared collection.
+
+---
+
+## Step 7 — Import from 1Password
+
+1. In 1Password, go to **File → Export** and export as `.1pux` format
+2. In the Vaultwarden web vault, go to **Tools → Import Data**
+3. Select **1Password (1pux)** as the format
+4. Upload the file — all items, folders, and structure are preserved
+
+---
+
+## Step 8 — TOTP / 2FA
+
+Since Vaultwarden unlocks all premium features, TOTP generation is available natively in the Bitwarden clients. To add a TOTP code to a login item:
+
+1. Edit the item in the vault
+2. Paste the TOTP secret (or scan the QR code in the mobile app)
+3. The client will generate rotating 6-digit codes automatically
+
+---
+
+## Notes
+
+- **Backups:** Vaultwarden data lives at `/share/CE_CACHEDEV1_DATA/vaultwarden/data`. Include this path in your regular QNAP backup job. The RAID 10 array provides hardware redundancy but is not a substitute for backups.
+- **Certificate renewal:** Caddy renews the Let's Encrypt certificate automatically before expiry. No manual action needed.
+- **Tailscale dependency:** The vault is only reachable over Tailscale. Ensure Tailscale is running on all client devices before expecting access.
+- **Container Station edits:** The GUI does not allow editing the YAML after deployment. To make changes, delete the application and recreate it with the updated YAML. Vaultwarden data persists on disk and is unaffected by container recreation.
+
+## Backup
+
+Vaultwarden data is located at `/share/CE_CACHEDEV1_DATA/vaultwarden/data` and contains:
+
+- `db.sqlite3` — the entire vault database
+- `rsa_key.pem` / `rsa_key.pub.pem` — the server key pair
+- `config.json` — admin panel configuration (if modified)
+
+A QNAP shared folder was created pointing to `/share/CE_CACHEDEV1_DATA/vaultwarden` making it visible to QNAP backup tools. It has been added to the main backup job in Hybrid Backup Sync.
+
+The Caddy data at `/share/CE_CACHEDEV1_DATA/vaultwarden/caddy/data` contains the SSL certificate but does not need to be backed up — Caddy will re-obtain it automatically from Let's Encrypt if lost.
+
+# Dev Diary — Caddy Failure, Cloudflare Token Cleanup, and Container Hardening
+
+## Date
+2026-05-15
+
+## Context
+A Vaultwarden setup behind a Caddy reverse proxy on a QNAP NAS started behaving unexpectedly: Caddy was repeatedly stopping and failing to restart properly. This broke HTTPS access to the service and required investigation into both container behavior and TLS configuration.
+
+---
+
+## Initial Symptom
+
+Caddy was in a restart loop or failing to stay up consistently. Logs indicated repeated startup attempts without stable operation.
+
+At first glance, this looked like a runtime or configuration issue inside Caddy itself.
+
+---
+
+## Investigation
+
+During troubleshooting, the following key issues were identified:
+
+### 1. Cloudflare API token exposed in plain text
+
+The Cloudflare API token used for DNS-01 challenge authentication was found directly inside the `docker-compose.yml` file.
+
+This presented two problems:
+- Security risk (secret stored in plaintext in versioned config)
+- Poor secret management practice
+
+---
+
+## Remediation — Secret Rotation
+
+Once the exposure was identified:
+
+- The existing Cloudflare API token was **revoked (rotated)**
+- A new token was generated
+- The new token was moved into a `.env` file instead of being stored in the compose file
+
+This ensured:
+- No secrets stored in version control or static YAML
+- Better separation of configuration and credentials
+
+---
+
+## Docker Compose Updates
+
+The `docker-compose.yml` was updated with several improvements:
+
+### 1. Removed inline secret usage
+- Cloudflare token removed from service definition
+- Replaced with `env_file: .env`
+
+### 2. Added proper port exposure for Caddy
+
+```yaml
+ports:
+  - "80:80"
+  - "443:443"
+```
+
+This ensured:
+
+* HTTP traffic properly handled for redirects / ACME validation
+* Standard TLS + HTTP accessibility
+
+3. Added restart policy
+```restart: unless-stopped```
+
+This improved resilience so that:
+
+* Caddy automatically recovers after reboots or crashes
+* Manual intervention is not required for service restoration
+
+Caddy Configuration Update
+
+The Caddyfile was updated to correctly reference the environment variable:
+
+```
+tls {
+    dns cloudflare {env.CF_API_TOKEN}
+}
+```
+
+This ensured:
+
+* Cloudflare DNS challenge uses injected runtime secret
+* No hardcoded credentials in configuration files
+
+Result After Fixes
+
+After applying the changes and recreating the stack:
+
+* Caddy started reliably
+* No more restart loops
+* Cloudflare DNS authentication succeeded
+* TLS certificates were issued automatically
+* Vaultwarden became reachable via HTTPS again
+
+⸻
+
+Key Learnings
+
+* Never store API tokens directly in docker-compose.yml
+* Secrets must be rotated immediately if exposed, even in local environments
+* Docker Compose environment changes require full container recreation
+* Caddy DNS-01 Cloudflare integration depends strictly on runtime env injection
+* Basic hardening (restart policies + proper port mapping) significantly improves stability
+
+⸻
+
+Final State
+
+✔ Secrets rotated and secured
+✔ Cloudflare token moved to .env
+✔ Caddy properly configured with env injection
+✔ Restart policy added for resilience
+✔ HTTP/HTTPS ports correctly exposed
+✔ Vaultwarden accessible via secure HTTPS
+
+⸻
+
+# The off-site pull key, and how wide it reaches (2026-07-28)
+
+Context: Vaultwarden itself moved off this box to Netcup back on 06-30. What the QNAP does now is
+hold the off-site copy of the estate — it pulls from Netcup over SSH on a cron.
+
+While splitting up SSH keys on the Netcup side, I edited that box's `authorized_keys`, which meant
+proving this machine could still reach it afterwards.
+
+## An error that looks like a failure and isn't
+
+Testing the pull key interactively returns:
+
+```
+rrsync error: SSH_ORIGINAL_COMMAND does not rsync
+```
+
+That is the key working exactly as intended. It's restricted with a forced `rrsync` command, so it
+refuses interactive shells by design. A real authentication failure says `Permission denied
+(publickey)` instead. Worth knowing which is which before assuming the backups are broken.
+
+To actually prove the path I ran a read-only `rsync --list-only` over the key, which returned a real
+file listing from Netcup. That's the test that means something — the same lesson as the `--dry-run`
+trap that nearly had me file a broken backup leg as healthy.
+
+## What the listing showed
+
+Two things, both queued as work rather than fixed in this sitting — see the resolution note below,
+which is why they're written up at all:
+
+1. **The rrsync root is the whole home directory.** The listing includes `.bash_history`, `.bashrc`,
+   `.profile` — none of which are backups. The key only needs the backup trees. Narrowing it is the
+   same least-privilege move as splitting the keys was, and it carries a specific risk: too narrow a
+   root breaks the pull *silently* on the next cron run rather than failing at change time, so every
+   path the pull touches (including the Vaultwarden leg) has to be enumerated and dry-run first.
+
+2. **A 6.3 GB `neko-uploads-pre-ewww-*.tar` from 06-24 sits inside that root**, so it's standing on
+   both sides of the mirror. The EWWW rollout it predates completed on 07-10 and has been stable
+   since, so it's very probably obsolete — but the pull mirrors with `--delete`, which means removing
+   it at the source also removes the only off-site copy. That's a decision to make deliberately, not
+   a side effect to discover later.
+
+> 💡 **Resolved 07-30, before this entry went public.** Both items above are closed. Each leg of the
+> pull now has its own key jailed to its own rrsync root — one for the site backups, one for the
+> vault — instead of the two of them sharing the home directory. That also settles item 2 as a
+> security question: the rollback tar sits outside both roots now, so the pull key can't see it at
+> all. Whether to delete the tar is still open, but it's a housekeeping call about disk, not an
+> exposure. Writing up an open hole on a public repo is the thing to avoid; writing up a closed one
+> is the point of keeping the diary.
+
+Key and env file remain under `/share/...`, not `/root` — see the 07-28 entry in `netcup.md` for why
+that rule exists and what it cost to learn.
+
+---
+
+# Key-only SSH, and the second password door I didn't know was open (2026-07-31)
+
+The house edge is sealed — no forwards, nothing answering from outside — so everything I can reach, I
+reach over the Tailscale mesh instead. Which means the mesh *is* the attack surface now, and a
+personal tailnet defaults to **allow-all**: every device can reach every other device on every port.
+This NAS holds the off-site copy of everything, so it's the box with the most to lose in that picture.
+
+Two changes, deliberately in this order: key-only SSH first, because it's independently revertible,
+and the mesh access policy last, so a failure is never two changes deep.
+
+## `PermitRootLogin no` would have locked me out of the box
+
+The obvious hardening line is the wrong one here. On QTS the `admin` account **is uid 0** — `id`
+returns `uid=0(admin) gid=0(administrators)` — and it's the only account sshd will accept. So
+`PermitRootLogin no` doesn't remove *root* login, it removes *all* login, and it removes it from the
+box you'd need to log into in order to undo it.
+
+The pair that actually does the job:
+
+```
+PermitRootLogin prohibit-password      # key allowed, password refused
+PasswordAuthentication no
+```
+
+## The part I got wrong, and only caught by asking the server
+
+With both lines in and sshd reloaded, I checked it the way that's worth checking — from a **new**
+connection, with the client forbidden from using a key, so the server has to say what else it will
+take:
+
+```bash
+ssh -vv -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=0 <host> true
+```
+
+```
+debug1: Authentications that can continue: publickey,keyboard-interactive
+```
+
+Still a password door open. `keyboard-interactive` is the PAM path, and it carries a password just as
+well as the one I'd just shut. It's a **separate directive**:
+
+```
+KbdInteractiveAuthentication no
+```
+
+The Pop!_OS box I hardened in the same sitting needed only `PasswordAuthentication no` — but purely
+because its shipped `sshd_config` already set the kbd-interactive line, which I'd never have noticed
+if I hadn't run the same check on both. **Nothing in either file tells you which default you're
+getting.** That's the lesson worth keeping: reading the config tells you what you wrote, not what the
+server accepts. Ask the server. Both boxes now answer:
+
+```
+debug1: Authentications that can continue: publickey
+```
+
+A related thing that can't be tested from the server side at all: whether some client out there still
+logs in *with* a password. sshd can tell you what it would accept; it cannot tell you what a client
+*would have* offered. That question only has a human answer, and getting it wrong means finding out
+when something breaks.
+
+## Editing sshd on a box whose only door is sshd
+
+The risk here isn't the config being wrong, it's the config being wrong *and* taking away the means to
+fix it. So the change went in behind a dead-man's switch: a backgrounded script that sleeps, and then
+restores the backup and reloads sshd **unless** a fresh session has touched a flag file first.
+
+```sh
+setsid sh -c 'sleep 180; [ -f /tmp/ok ] && exit 0; cp -a "$CFG.bak" "$CFG"; kill -HUP <sshd-pid>' &
+```
+
+Open a new connection, confirm it works, touch the flag, kill the sleeper. If instead I'd locked
+myself out, the box would have quietly undone it three minutes later. It never fired, but it's the
+difference between a mistake and an outage that needs physical access.
+
+Reload was `kill -HUP` on the sshd master rather than restarting the service — sshd re-execs and
+rereads its config without touching sessions that are already established, so the session I was
+sitting in was never at risk. QTS's `login.sh` restarts more than sshd, so HUP is the smaller hammer.
+
+Two QNAP-specific notes for anyone doing the same: `nohup` and `timeout` **don't exist** in that
+shell, so `setsid` and a manual kill are the way. Entware fills most of the other gaps.
+
+## Persistence on QTS is better than I'd assumed
+
+I'd written this box off as one where `/root` doesn't survive a reboot, which is true — but
+incomplete. `/etc/config` is a symlink to `/mnt/HDA_ROOT/.config`, i.e. flash, and `/root/.ssh` is a
+symlink into that same place. So the sshd config **and** the authorized keys both persist; it's only
+the directory around them that gets recreated.
+
+What isn't guaranteed is a firmware update, which can rewrite service configs. So I keep a
+checksum-matched copy of the live file elsewhere — after an update, the question "did QTS put my
+config back the way it found it" is a diff instead of a memory test.
+
+## What the NAS accepts now
+
+The mesh policy is deny-by-default, and the NAS's grants come out as:
+
+- **My admin machines** — everything.
+- **The family laptop** — only what it actually uses, and **never a shell**. There's no reason for a
+  laptop to hold a session on a box whose only account is uid 0.
+- **The public-facing web server** — *nothing*. It's the machine most likely to be compromised and it
+  had no business reaching the backups; nothing legitimate used that path, because the off-site pull
+  runs the other way round and doesn't use the mesh at all.
+
+The family-laptop grant is the one where I changed my mind mid-review. My first pass gave it the media
+ports and deliberately withheld file sharing, which felt like good least-privilege — until I remembered
+her Time Machine backups run to a share on this box. **A blocked backup fails quietly and stays
+broken**, and you find out about it on the day you need it. That's a worse outcome than the port being
+reachable from a laptop I already trust, so it's granted. Least-privilege is a default, not a rule to
+follow off a cliff.
+
+---
+
+# The reboot that left no crash to find (2026-08-22)
+
+The NAS dropped off the network at about 11:24 and was back by 11:34. Nothing else in the house so
+much as flickered. I went in certain of one thing: **it can't have been power**, because the box sits
+behind an EcoFlow Delta 2 and a battery that big doesn't just blink.
+
+That premise was wrong, and the way it was wrong is the useful part of this entry.
+
+## Three places to look, and the one that mattered
+
+QTS says plainly what it thinks happened:
+
+```
+2026-08-22 11:29:43  [Power] The system was not shutdown properly last time.
+2026-08-22 11:26:54  first post-boot event (RAID resync)
+```
+
+So: unclean. That narrows it to "crashed" or "lost power", and those two want very different fixes, so
+the whole job is telling them apart.
+
+The kernel log is persisted to flash at `/mnt/HDA_ROOT/.logs/kmsg`, and because it only rotates on
+size, the live file still reached back past the event:
+
+```
+2026-08-22 02:03:37  [975649.875824] EXT4-fs (device dm-11): ext4trim finish
+2026-08-22 11:33:04  [    0.000000] Linux version 5.10.60-qnap ...
+```
+
+Nine hours of silence, then the boot banner. No panic, no oops, no OOM kill, no soft lockup, no I/O
+error, no NIC reset. The kernel didn't complain on the way out. It stopped mid-sentence.
+
+Silence is suggestive but not proof — a box that hard-hangs also goes quiet, and rsyslog can't flush
+what it never got. The thing that actually decided it was **the crash buffer being empty**.
+
+## Why an empty log is the loudest evidence in the room
+
+QTS boots with ramoops configured, a 2 MB region pinned at a fixed physical address:
+
+```
+ramoops.mem_address=0x8000000   ramoops: using 0x200000@0x8000000
+pstore: Registered ramoops as persistent store backend
+```
+
+The kernel console is mirrored into that RAM as it runs. On the next boot `/etc/init.d/init_check.sh`
+mounts pstore, and if `console-ramoops-0` is there it rotates the saved copies and writes a new one:
+
+```sh
+/bin/mount -t pstore - /sys/fs/pstore
+if [ -f /sys/fs/pstore/console-ramoops-0 ]; then
+    ...rotate pstore_1 -> pstore_2 -> pstore_3...
+    /bin/cp /sys/fs/pstore/console-ramoops-0 /mnt/HDA_ROOT/.logs/$pslog1
+fi
+```
+
+Two things follow, and I only trusted the conclusion once I'd checked both.
+
+**One: this fires on every boot, not just bad ones.** The three files on disk are dated 07-25 and
+08-10 ×2, and one of those lines up with a perfectly ordinary reboot I did myself. So a saved dump is
+the *normal* outcome, which makes its absence meaningful rather than unremarkable.
+
+**Two: it wasn't skipped.** The branch is gated on a loop that waits up to three seconds for
+`/mnt/HDA_ROOT/.logs` to exist. That's flash, mounted early, always there — so the guard passes and
+the extraction genuinely ran and genuinely found nothing. Worth reading the guard before leaning on a
+negative result; "the log is missing" and "the thing that writes the log never ran" look identical
+from the outside.
+
+And that's the answer. **ramoops survives a warm reset** — that is the entire point of it. A kernel
+panic, a watchdog reset, a `reboot`: all of those leave the DRAM contents intact and the record turns
+up on the next boot. What ramoops does *not* survive is the RAM losing power.
+
+The buffer was empty. The RAM went dark. That isn't a crash, it's a power event.
+
+## What that let me rule out
+
+| Suspect | Evidence against |
+|---|---|
+| Thermal | CPU 54 °C, system 43 °C, disks 47–49 °C, fan 2471 RPM — all unremarkable |
+| Disk / RAID | `md1` clean `[UUUU]`, resync done by 11:39; all four disks 0 reallocated / 0 pending / 0 uncorrectable |
+| UPS-triggered shutdown | UPS integration is `Enable = FALSE`, `AC Power = OK` — and a Delta 2 has no UPS data port to signal over anyway |
+| Scheduled or graceful reboot | No `shutdown.log` entry for the day at all |
+| Software crash | Empty ramoops, silent kernel log, silent event log |
+| House-wide outage | Both Pis had multi-day uptimes and never blinked |
+
+It came back on its own because `Power_Recovery_Mode = 2` — the box is set to resume its previous
+state rather than stay off. Which is why I'd never had to think about any of this before: the failure
+mode and the recovery cancel out, and all you notice is a ten-minute hole.
+
+## It's been getting worse — but not on one machine
+
+`[Power] The system was not shutdown properly last time.` is greppable, and the event log reaches back
+to 2020-02-12. Seventeen of them. Counting by year:
+
+| Year | Unclean shutdowns |
+|---|---|
+| 2021 | 2 |
+| 2022 | 2 |
+| 2023 | 1 |
+| 2024 | 1 |
+| 2025 | 4 |
+| 2026 | **7** (to August) |
+
+That is the table I first published, and it is the wrong shape. Annual buckets destroyed the one
+feature in this data that actually matters.
+
+**The log is older than the chassis.** `/mnt/HDA_ROOT` is `/dev/md9`, a RAID1 that lives on the
+*drives*, not on the board. When my previous NAS failed in May 2025 I moved the disks into a
+second-hand replacement, and six years of event history came across with them. So this is one
+continuous record of my storage and my house, spanning two machines with two different power supplies.
+The migration is visible in the log itself: an abnormal shutdown at 2025-05-19 07:31:34, a RAID resync
+minutes earlier, a backup job aborting at 07:35, and 4,841 events logged that month against a
+550–1,400 monthly baseline.
+
+Split the same seventeen at the swap and the ramp disappears:
+
+| Machine | Unclean shutdowns |
+|---|---|
+| Old chassis, 2021-10 → 2025-05 | 10 — the last two three days apart, and then it died |
+| **This chassis, 2025-05 → 2026-02** | **0** |
+| This chassis, 2026-02 → 2026-08 | 7 |
+
+**Nine months of silence on the replacement, and then it starts.** "2025: 4" reads like the midpoint of
+a gentle slope; all four of those were on the old machine, and the new one was clean for the rest of
+the year.
+
+The times of day are scattered across the whole clock — 05:39, 10:15, 13:02, 16:10, 20:57 — so it
+isn't tracking a schedule, a backup window, or an afternoon heat soak. And 2026-02-16 produced three
+in one evening, which is the shape of either a supply failing under stress or a grid throwing repeated
+transfer events.
+
+What the split changes is which of those two it favours. If the mains here were uniformly hostile, the
+new box should have started failing on arrival — it didn't. Two supplies each degrading on their own
+clock fits a nine-month gap much better, and it fits how the old machine ended: quiet for years, then
+two failures in three days, then dead. I can't name anything that changed in this house in February
+2026, and I did go looking.
+
+I'd seen every one of these as a one-off. Each was individually forgettable; the trend is not. **The
+log had been telling me this for years and I'd never once asked it the aggregate question — and when I
+finally asked, I asked at the wrong granularity and nearly drew the wrong conclusion from my own
+data.**
+
+## Reconciling it with the battery
+
+So how does a box on a 1 kWh battery lose power while nothing else does?
+
+Because a Delta 2 is not an online UPS. It's pass-through with a transfer to battery measured in
+milliseconds, and during that gap every device is running on whatever its own power supply can hold
+up. Most things ride it out invisibly. Something with a decade-old supply and tired electrolytics may
+not — and the hold-up time gets shorter as the capacitors age, which fits an accelerating failure rate
+better than anything else I can point at.
+
+Both halves of the contradiction are true at once: the battery did take over, *and* the NAS lost
+power. It just lost it for the few milliseconds before the battery arrived.
+
+That's the reframe worth keeping. **"It's on a UPS" is not the same claim as "it cannot lose power."**
+I had been treating the first as if it entailed the second, and that assumption is exactly what stopped
+me looking at this properly the previous six times.
+
+Still open, and honestly labelled as such: I have not yet confirmed a grid event at 11:24. The Delta 2
+has no shell and no local login, so that correlation has to come from EcoFlow's own telemetry — a cloud
+API, which means the logger can live on any always-on box rather than anything wired to the battery.
+The Mac Mini gets the job. Until that lands, "brief sag on transfer" is the best-supported story and
+not a proven one.
+
+With one caveat I want on the record before I lean on it: a transfer measured in milliseconds may
+never appear in that telemetry at all. The battery reports state periodically, so the logger will catch
+a *sustained* outage cleanly and may be entirely blind to the sub-second sag that is the leading
+hypothesis. **A quiet log will not be evidence of innocence**, and if I forget that I'll misread the
+next one badly. The competing explanation — a failing adapter or a marginal DC jack, with no grid event at all —
+predicts exactly the same evidence and is fixed the same cheap way, which is why the power brick gets
+replaced regardless.
+
+## Two things I found while I was in there
+
+**Bay 4 is the only drive with a dirty link record.** Mapping device nodes to physical bays is worth
+doing explicitly, because they do not come out in order:
+
+```
+Port 1 -> /dev/sdb    Port 2 -> /dev/sda
+Port 3 -> /dev/sdc    Port 4 -> /dev/sdd
+```
+
+`sdd` — **bay 4** — carries `UDMA_CRC_Error_Count = 11` and `Command_Timeout = 11`, worst normalized
+value down to 094. The other three are clean zeros. CRC errors are link-layer, which usually means
+cable or seating rather than platter, and its media stats are spotless. Not related to the reboot, but
+it's the one drive to reseat next time the lid is off. It's also the odd one out by model — an
+`ST8000NT001` where the others are `ST8000VN004` — so it went in as a replacement at some point.
+
+**The encryption is costing more than it's protecting.** Load average sits near 10 while the CPU is
+28% idle, which is the signature of threads blocked rather than busy — and the processes in `D` state
+are `dmcrypt_write` and a `dm` kworker. The volume is encrypted (`/share/CE_CACHEDEV1_DATA`,
+`/dev/mapper/ce_cachedev1`, `aes-cbc-plain`) and this box's J1900 has **no AES-NI** — I checked the
+flag rather than assuming it. Every write goes through software AES on a 2014 Celeron.
+
+The part that changes the calculus is where the key lives: on the NAS itself, so the volume unlocks
+itself at boot. That's not a misconfiguration — it's the only way an unattended box comes back from a
+03:00 power blip with its shares intact, and this morning it's exactly what got everything running
+again by 11:34 with nobody at the console.
+
+But it does bound what the encryption is worth. **A key stored on the machine protects the drives, not
+the machine.** A pulled disk is noise; a whole machine carried off takes its key with it. The threat it
+defends against is bare-drive disposal or a single-disk theft, not the whole box walking. I'd been
+carrying it in my head as "the backups are encrypted", full stop, which is a stronger claim than the
+setup supports.
+
+Which leaves a real trade to make rather than an obvious fix: permanent crypto tax on every QVR Pro
+write, in exchange for protection against one fairly narrow scenario. Worth noting QTS has no in-place
+decrypt — encryption is chosen when the volume is created and the only way out is destroy and rebuild,
+which with 9 TB on a 12.7 TB volume is a long restore. **Not a job to run on a box that browns out
+every few weeks.** Fix the power first; that ordering isn't optional.
+
+## What I'd tell myself
+
+- A missing crash dump is a finding, not a dead end — but only after you've checked that the thing
+  which writes it actually ran.
+- Warm reset versus cold reset is a question DRAM can answer, and on QTS it already has.
+- Grep the event log for the aggregate before diagnosing the instance. Seven this year reads very
+  differently from one this morning, and it's the same log either way.
+- "It's on a battery" is a claim about *outages*. It says nothing about *transfers*, and the gap
+  between those two words is where this whole thing lived.
+
+---
+
+# A loop with only one cable in it, and a lease pinned to a dead adapter (2026-08-23)
+
+I plugged an Orbi satellite into the NAS and the house network started coming apart. QuLog filled with
+gateway reconfigurations, Adapter 2 and Adapter 3 flapping up and down, and the VPN client tearing
+down and redialling in a loop. The cabling I'd done looked like this, and looked fine:
+
+```
+RBR50 router ──▶ QNAP Adapter 1
+QNAP Adapter 3 ──▶ Sat1
+```
+
+A straight line. Two cables. I spent a while insisting to myself that a straight line cannot be a
+loop, which is true, and which is also why it took me so long to see it.
+
+## The second leg wasn't a cable
+
+The QNAP runs its four NICs as a QTS **Virtual Switch**, which underneath is a plain Linux bridge —
+not Open vSwitch, `ovs-vsctl` isn't even installed. All four adapters sit in one flat L2 domain:
+
+```
+bridge name   bridge id           STP enabled   interfaces
+qvs0          8000.00089b:xx:xx:9d   no         eth0 eth1 eth2 eth4
+```
+
+`STP enabled: no`. Four ports, one broadcast domain, no loop prevention. That's the loaded gun; the
+satellite was the trigger.
+
+Sat1 is an RBR50 — a *router* pressed into service as a satellite — and an Orbi satellite does not
+choose one backhaul and commit. It brings up Ethernet and it keeps its radio associated to the router
+while it works out which one it prefers. So the actual topology, for as long as that decision took,
+was:
+
+```
+RBR50 ──cable──▶ eth0 ──qvs0 bridge──▶ eth2 ──cable──▶ Sat1 ──radio──▶ RBR50
+```
+
+Three legs, and the one that closes the ring is made of air. It never appears in any cable trace,
+which is exactly why my "it's a straight line" reasoning felt so solid and was so wrong. The bridge
+was doing precisely what a bridge does — forwarding frames between two ports — and those two ports
+happened to be two ends of the same network.
+
+The kernel said so in as many words, 100 times:
+
+```
+[73973.400163] qvs0: received packet on eth0 with own address as source address
+               (addr:00:08:9b:xx:xx:9d, vlan:0)
+```
+
+That message is the bridge receiving a frame it originally sent. There is no innocent reading of it.
+
+## The log had already told me it was over
+
+Here is the part I got wrong, and it's a more useful mistake than the topology one.
+
+I read the QuLog screenshot as an emergency in progress and started planning an urgent cable pull. It
+wasn't in progress. The whole thing was a **transient**, confined to the window in which Sat1 was
+making up its mind:
+
+| Time | Event |
+|---|---|
+| ~11:50 | Sat1 cabled to Adapter 3 |
+| 11:54:07 | First loop burst (~5 s) |
+| 12:56–12:58 | Link flapping on eth1/eth2 — 39 transitions |
+| 13:03:02–13:03:07 | Second loop burst, then silence |
+| 17:43 | I take the screenshot |
+
+Five hours of quiet before I even looked. And the evidence was *in the screenshot* — its newest entry
+was timestamped 13:02, taken at 17:43. Four hours and forty-one minutes of nothing, sitting right
+there in the image I was using as proof of an ongoing fault. I'd looked straight past it because I was
+reading the log for *what it said* and not for *when it stopped saying it*.
+
+A log's last timestamp is data. If the newest line is hours old, the thing is not happening now, and
+that changes the fix from "pull the cable this second" to "understand it, then do it properly."
+
+## Reading the direction of a loop out of the counters
+
+Before the rewire, `ethtool -S` on each NIC was unusually eloquent:
+
+| NIC | Adapter | rx_broadcast | tx_broadcast |
+|---|---|---|---|
+| eth0 | 1 (router) | 274,653 | 31,197 |
+| eth1 | 2 (homeplug) | 15,788 | 289,607 |
+| eth2 | 3 (Sat1) | 1,432 | 250,381 |
+
+Broadcast comes *in* on eth0 and goes *out* everywhere else, which is just a bridge flooding normally.
+The useful asymmetry is eth2: 1,432 received against 250,381 sent. Sat1 was being shouted at and
+barely answering — consistent with a satellite whose Ethernet side was up but which wasn't yet using
+it as its path home.
+
+Two things worth writing down about `brctl showmacs`, because both cost me time:
+
+**Bridge port numbers are not adapter numbers.** They're assigned in the order interfaces joined the
+bridge, and on this box they land scrambled:
+
+```
+eth0 (Adapter 1) -> port 1      eth1 (Adapter 2) -> port 4
+eth2 (Adapter 3) -> port 2      eth4 (Adapter 4) -> port 3
+```
+
+I read "port 2" as "Adapter 2" for a good few minutes and drew confident conclusions from it.
+
+**A dead link still holds a bridge port.** Adapter 2 had a HomePlug adapter in it that I'd stopped
+using — high jitter, periodic drops, which I put down to the wiring in an old kominka. A 20-second
+counter delta settled whether it mattered:
+
+```
+eth0  +36,982 packets      eth2  +39,909 packets      eth1  +2 packets
+```
+
+Two packets. Its powerline partner was gone and it had nothing to bridge to. Not a suspect — but still
+a full member of `qvs0`, which becomes important further down.
+
+## STP was the reflex, and it was the wrong fix
+
+My first instinct was to switch on Spanning Tree in the Virtual Switch UI, which is the textbook answer
+to a bridging loop and which I talked myself into and back out of twice.
+
+Against it: STP can only ever fix this by blocking a port, and the only candidates were the uplink to
+the router or the cable to Sat1 — both of which I actually want forwarding. That reasoning is correct
+for a *permanent* loop.
+
+For a *transient* one it's backwards. Blocking eth2 during backhaul negotiation is the right call, and
+STP re-converges on its own once the radio drops out. So STP would have worked here.
+
+It's still not what I did, because it treats the symptom. STP is what you turn on when you have a loop
+you can't eliminate. I could eliminate this one. The costs are real too — roughly 30 seconds of
+listening and learning on every link event before a port forwards, on a box that already reboots more
+than I'd like — and consumer mesh gear is not reliable about passing BPDUs through, so an STP domain
+that stops at the Orbi is a false sense of safety.
+
+The rule I'd rather hold: **STP is a seatbelt, not a topology.** Fix the topology.
+
+## What I changed
+
+The one arrangement in this house with a clean track record is Sat2, which has been wired straight to
+the router the whole time without a single incident. So: both satellites onto the router, everything
+else behind a spare Linksys LGS108, and the NAS reduced to a single cable so its bridge becomes a
+**leaf** and can't be a transit path for anything.
+
+```
+fiber modem ──▶ RBR50 WAN (port 1)
+RBR50 port 2 ──▶ Sat1 ethernet backhaul
+RBR50 port 3 ──▶ Sat2 ethernet backhaul
+RBR50 port 4 ──▶ LGS108 port 1
+                 LGS108 port 2 ──▶ QNAP Adapter 1   (only cable in the NAS)
+                 LGS108 port 3 ──▶ Mac Mini 2012    (AdGuard DNS + DHCP)
+                 LGS108 port 8 ──▶ HomePlug         (single adapter, no partner)
+```
+
+Cables moved at 18:33; by 18:36 eth1 and eth2 were down and stayed down. The forwarding table is the
+proof it worked — every remote address is now learned on the single uplink:
+
+```
+port 1: 25 macs      port 2: 1 mac (local)      port 3: 1 mac (local)
+```
+
+Sat1's address moved from port 2 to port 1, meaning the NAS now reaches it via the switch and the
+router rather than down a private cable, and its two clients followed it across. Loop message count
+frozen at 100 with none since. eth0 clean: `rx_crc_errors: 0`, `rx_missed_errors: 0`.
+
+The HomePlug is the one thing left that could re-create this, and it's worth being explicit about why.
+A powerline adapter is a transparent L2 bridge — pair two and their Ethernet ports are the same
+broadcast domain, with the mains as an invisible cable between them. On the switch with no partner
+it's inert. It becomes a loop the moment its partner's Ethernet side touches the LAN again: a
+satellite's spare LAN port, another switch, anything. Identical shape to the Orbi loop, over copper
+instead of air.
+
+## The lease was pinned to the adapter I'd stopped using
+
+The near-miss. Before moving anything I checked how `qvs0` gets its address, expecting static:
+
+```
+option dhcp-client-identifier 1:0:8:9b:xx:xx:9d
+option dhcp-server-identifier <macmini-ip>
+fixed-address <qnap-lan-ip>
+```
+
+DHCP, from the Mac Mini, keyed to `…9d`. That's **eth1's MAC — Adapter 2, the port with the dead
+HomePlug in it.** A Linux bridge takes the lowest MAC among its members, eth1 sorts below eth0's
+`…9c`, and so the NAS's entire network identity had quietly attached itself to the one adapter I'd
+written off as useless.
+
+My plan had been to strip the Virtual Switch back to Adapter 1 only. That would have dropped the
+bridge MAC to `…9c`, changed the DHCP client identifier, and presented AdGuard with what looks like a
+brand new device — moving the NAS off its address and taking every hardcoded reference with it.
+
+In the end I moved cables and left the Virtual Switch membership alone, so the address never moved.
+Worth being clear that this was luck rather than judgement: a bridge keeps a member's MAC even with
+the carrier down, so `…9d` survived a dead port.
+
+That leaves the config in a state I should name honestly. Adapters 2, 3 and 4 are **still bridge
+members** with STP still off. Physically the box is a leaf and cannot loop. But plug a cable into any
+of those three ports and it silently rejoins `qvs0`, and if that cable has another way back to the
+LAN, this entry happens again. The safety is in the cabling, not the configuration. Cleaning it up
+means staging a reservation for `…9c` on the Mac Mini first, and that has to happen *before* the
+membership change, not after.
+
+## What the fix didn't fix
+
+Load average before the rewire was 10.71. An hour after, on a demonstrably loop-free network: 10.46.
+
+The loop was never what was pinning this box. It's QVR Pro — the motion-detection workers, and a
+`mongod` sitting on 2.2 GB of surveillance log database. I'd have happily filed all of it under "must
+have been the network" if the number had moved, and the number didn't move.
+
+I first wrote that up as QuLog Center churning against an unconfigured destination volume, which was
+wrong and is worth correcting rather than quietly editing out. **There are two things on this box
+called "the log service" and I picked the wrong one.** The hot `mongod` declares `dbPath: "/storage/
+mongodb/"`, which reads like a system path and isn't — its open file descriptors resolve to
+`QVRProDB/QVRProDB/Log/mongodb` on the data volume. QuLog's own database is MariaDB, 1.6 MB, on
+flash, and it isn't grinding through anything at all. Resolving a config path through `/proc/<pid>/fd`
+rather than trusting what the config file says is what separated them.
+
+Also worth noting the VPN, which produced the loudest and most alarming lines in the original log,
+never had a problem at all. The bridge loop caused the gateway to be re-elected, re-election tore down
+the default route, and the tunnel dropped because its next hop vanished. It was the most visible
+symptom and the furthest thing from the cause.
+
+## A power cut ran the experiment for me
+
+Unrelated to the network, but it happened this afternoon and it's the cleanest evidence I've had on the
+power question I left open yesterday, so it goes here rather than getting lost.
+
+Yesterday this NAS lost power on its own. Both Raspberry Pis, on house mains and not on the battery,
+sailed through on multi-day uptimes. This afternoon the grid actually went out, house-wide — both Pis
+rebooted, and the NAS, the router and the Mac Mini, all behind the Delta 2, never noticed.
+
+That's a clean inversion, and I couldn't have arranged it better deliberately:
+
+| | NAS (on battery) | Pis (on mains) |
+|---|---|---|
+| 2026-08-22 | **went down** | up throughout |
+| 2026-08-23 | up throughout | **both rebooted** |
+
+Two things fall out of it. The battery does its job — demonstrated against a real outage rather than
+assumed from a spec sheet. And whatever took the NAS down yesterday reached exactly one device: the one
+*behind* the battery. A grid event cannot do that. Yesterday I wrote that a failing adapter "predicts
+exactly the same evidence" as a millisecond transfer sag, so I couldn't separate them. That stopped
+being true the moment the grid handed me a control group.
+
+Reading it out of uptimes rather than logs is the part worth keeping. The Pis don't log power events at
+all, but `uptime` back-calculates a boot time, and boot times either side of a known event are a
+measurement. One caveat I'd rather record than smooth over: the two Pis came back 68 minutes apart,
+which is more spread than one outage should produce. That isn't explained yet, and it's the sort of
+loose thread that turns out to matter.
+
+## What I'd tell myself
+
+- A loop needs two paths, not two cables. Radio backhaul, powerline, a second SSID, anything
+  transparent at L2 — if you're only auditing things you can physically trace, you're auditing the
+  wrong set.
+- Check when a log *stopped* before reacting to what it says. Newest timestamp versus wall clock is
+  one subtraction and it reframes the entire job.
+- STP is what you enable when you can't remove the redundant path. If you can remove it, remove it.
+- Bridge port numbers are assignment order, not adapter numbers. Read the mapping, don't infer it.
+- Before changing bridge membership, find out which member's MAC the bridge is wearing. On a DHCP box
+  that MAC is your identity on the network, and it may well belong to a port you think is dead.
+- When a fix lands, check the metric you were blaming *before* it. A number that doesn't move is
+  telling you that you just fixed a different problem than the one you noticed.
+- When you finally aggregate a long log, check that your buckets aren't hiding the boundary. Mine were
+  annual; the fact that mattered was a nine-month gap sitting inside one of them.
+
+---
+
+# A part number that matched and a cable set that didn't (2026-09-10)
+
+Today was supposed to be the day the power fault got fixed. The replacement supply had arrived, I took
+a full snapshot of the box at 10:52, shut it down cleanly, and got the lid off. The new unit went
+straight back in its box.
+
+It doesn't fit. Not the chassis — the **cables**. The harness on the replacement doesn't carry the
+connectors this machine needs, on a unit whose model number matches the one it's replacing character
+for character.
+
+That took the afternoon's motivation with it. Writing it up is the salvage operation, and there turned
+out to be three things worth recording that had quietly gone right while I wasn't looking at them.
+
+## "The power brick" was the wrong three words
+
+Start with my own language, because that's where this began. Every previous entry in this file calls
+the thing I need to replace **the power brick** — right down to "the power brick gets replaced
+regardless" in the 08-22 entry. A brick is an external adapter: a sealed lump on a cord with one DC
+plug on the end. Replacing one is a matter of matching volts, amps and barrel diameter.
+
+The TS-453 Pro doesn't have one. It has an **internal flex-ATX supply** — 250 W, screwed into a cage
+behind the drive bays, fed from the IEC inlet on the back panel. That is a completely different
+shopping problem, and I never went back and re-examined the shorthand I'd been using for months. I
+bought against the phrase instead of against the part.
+
+## The model number identifies the supply, not the harness
+
+Here's the actual trap, and it's a known one for these QNAPs.
+
+The mainboard side is ordinary — standard ATX pinout, nothing special. The **drive backplane** is not.
+It takes a QNAP-specific 20-pin connector, which owners have reverse-engineered as five pins of 5 V
+and five pins of 12 V on one side, ten grounds on the other. Electrically that's trivial; the pins are
+paralleled because the rail has to carry four drives through simultaneous spin-up. Mechanically it's
+specific to QNAP's board and appears nowhere else.
+
+And FSP builds the same base model in OEM variants with **different cable sets depending on which
+chassis it was destined for**. So:
+
+| | Replacement | What the TS-453 Pro needs |
+|---|---|---|
+| Model number on the label | identical | — |
+| Form factor, mounting, wattage | identical | — |
+| Mainboard connector | standard ATX | standard ATX ✅ |
+| Backplane feed | absent | QNAP 20-pin ❌ |
+
+The number on the label describes the supply. It says nothing about what's hanging off it. I matched
+on the identifier that was easy to compare and not on the one that determines whether the thing works,
+which is a mistake I'd like to think I wouldn't make in software and clearly do make in hardware.
+
+## Three ways out, and why I took the boring one
+
+**Build an adapter** from the new unit's SATA/Molex outputs into a 20-pin housing. Entirely on the DC
+side, nothing dangerous, and the pinout is public. But it means hand-crimping the rail that feeds four
+drives through spin-up — on the one box in this house whose entire diagnosed problem is *unreliable
+power*. Introducing a joint I made myself into that circuit is not a way to test a power hypothesis.
+
+**Transplant the original harness** onto the new supply's board. Cheapest, and the platforms match.
+It means opening a mains PSU. No.
+
+**Return it and buy again, by harness.** Which is what's happening. The official part exists and is
+priced like an official part; used originals turn up for a fraction of that. Either way the thing to
+ask the seller for is **a photograph of the cable set**, not a model number — and to compare it
+against a photograph of mine.
+
+It was unwrapped but never installed, which as far as I can tell keeps it inside the distance-selling
+right to withdraw: opening packaging to establish what an item is, is exactly what that right is for.
+If the listing claimed TS-453 Pro compatibility then "not as described" is the stronger line to take,
+because it puts the return postage on the seller rather than me. I photographed both harnesses side by
+side before packing it back up, which is the one genuinely productive thing I did today.
+
+## Eight days, no ninth event
+
+Since the fault is still unfixed, the count still matters. The improper-shutdown events on this
+chassis in 2026, read out of the event log:
+
+| Event logged | Gap since previous |
+|---|---|
+| 2026-02-16 19:37 | — (first after nine clean months) |
+| 2026-02-16 20:50 | 73 minutes |
+| 2026-02-16 20:57 | 7 minutes |
+| 2026-05-25 10:15 | 98 days |
+| 2026-05-29 12:35 | 4 days |
+| 2026-07-05 13:02 | 37 days |
+| 2026-08-22 11:29 | 48 days |
+| 2026-09-02 15:07 | 11 days |
+
+Nothing since. This morning the box was at 6 days 15 hours, counted from a manual reboot I did myself
+on 09-03 — so eight days clean, and no ninth event.
+
+Which proves nothing, and I want that written down before I start feeling reassured by it. This fault
+has gone 98 days between appearances. A quiet week and a half sits comfortably inside its normal
+silence. The only thing in that table I'd actually lean on is the shape of the tail — 48 days, then
+11 — because the previous chassis ended with two failures three days apart and then didn't come back.
+
+One precision worth keeping: these timestamps are when the NAS **came back**, not when it died. QTS
+writes the line on the next boot, so every interval above is boot-to-boot.
+
+## The load average halved and I didn't notice
+
+The 08-23 entry ended on a number that refused to move: load average 10.71 before the rewire, 10.46
+after, and my conclusion was that QVR Pro was what had been pinning the box all along.
+
+This morning's snapshot, same box, same job:
+
+```
+load average: 5.35, 5.25, 6.15
+```
+
+Half. The change in between was moving **Plex off the NAS and onto the Astromeda PC** — Windows 11,
+Docker Desktop — where it now reads its media off the QNAP over the network instead of living on it.
+
+So the August conclusion was half right in a way I should name. QVR Pro *is* the resident load, and
+the motion workers and that `mongod` are still here. But Plex was the other half, and I'd written it
+out of the picture entirely because I was busy being pleased about correctly ruling out the network.
+Finding one true cause is not the same as finding the cause, and a load average is a single number
+covering an unknown number of contributors.
+
+What it doesn't do is touch the crypto tax. Plex reading files over SMB still pulls every byte up
+through `dm-crypt` on a J1900 with no AES-NI; what left the building is the *transcoding*, not the
+decryption. And on that front I've stopped treating it as a task. Nothing short of a newer NAS with a
+CPU that has AES-NI changes the arithmetic, so it's a hardware limitation to live with rather than a
+thing to schedule.
+
+## Bay 4, reseated, and a number that can only ever look the same
+
+The lid was off anyway, so bay 4 finally got its SATA cable reseated — the drive that's carried
+`UDMA_CRC_Error_Count = 11` and `Command_Timeout = 11` since I first went looking, while the other
+three sit on clean zeros. This morning's baseline, taken before I touched anything:
+
+```
+ST8000VN004  (bay 1)   UDMA_CRC 0    Command_Timeout 0
+ST8000VN004  (bay 2)   UDMA_CRC 0    Command_Timeout 0
+ST8000VN004  (bay 3)   UDMA_CRC 0    Command_Timeout 0
+ST8000NT001  (bay 4)   UDMA_CRC 11   Command_Timeout 11   (worst 094, current 100)
+```
+
+Afterwards: still 11 and 11. Which is the *only* good outcome available, and it's worth being precise
+about why. These are cumulative raw counters. They cannot go down. A reseat can never be confirmed by
+today's reading — it can only be **disconfirmed later**, by the number climbing. The normalised
+current value being back at 100 against a worst of 094 already told me nothing recent had happened, so
+the reseat was preventive maintenance on a link that wasn't currently misbehaving.
+
+Hours of uptime is not evidence either way. This one goes on the watch list and comes off it in
+months, not days.
+
+## The box is a leaf now
+
+The last entry left the network in a state I described as safe-by-cabling rather than
+safe-by-configuration: Adapters 2, 3 and 4 still members of the Virtual Switch bridge, STP still off,
+and nothing but my own discipline stopping a future cable from closing the ring again.
+
+That's been fixed properly, by removing the NAS from the middle of the network entirely. There is now
+a **Linksys 8-port unmanaged switch**, and everything hangs off it:
+
+```
+Linksys 8-port (dumb)
+ ├── RBR50 router
+ ├── Sat1
+ ├── Mac Mini 2012
+ ├── HomePlug
+ └── QNAP — Adapter 1, one cable, the only port with anything in it
+```
+
+The snapshot agrees:
+
+```
+eth0: oper=up    speed=1000
+eth1: oper=down
+eth2: oper=down
+eth4: oper=down
+```
+
+One port up, three dark. The NAS forwards nothing for anybody, so there's no second path for a loop to
+close through and no reason to think about STP on this box again. The part that matters day to day:
+**rebooting the NAS no longer takes anything else off the network with it.** When it was carrying the
+satellite's traffic, every reboot — and this box reboots itself uninvited — was a small house-wide
+outage. Now it's just the NAS going away.
+
+And the thread from the last entry survives, usefully. The bridge still wears eth1's MAC
+(`00:08:9b:xx:xx:9d`), because a Linux bridge keeps a member's address with the carrier down and eth1
+is still nominally a member. That's the adapter I described as dead and wrote off — and it's the
+reason the DHCP reservation still matches and the box's address hasn't moved through any of this. The
+lease is still pinned to a port with no cable in it, and that is now the thing holding my network
+identity still.
+
+## What I'd tell myself
+
+- Check the shorthand you've been using for a part before you buy the part. I searched for months
+  against "power brick" and this machine has never had one.
+- A model number identifies a component. It does not identify what's attached to it. For anything OEM,
+  match on a photograph of the connectors.
+- The cheap DIY fix and the problem you're fixing can be the same circuit. Don't hand-crimp the rail on
+  the box you already suspect of power faults.
+- A cumulative counter can't validate a repair, only invalidate it later. Take the baseline, then wait
+  the real interval — not the interval your patience prefers.
+- When one true cause explains a symptom, check whether it explains *all* of the symptom. Mine
+  explained about half the load average and I stopped looking.
+- The best fix for "this device is in the path of everything" is usually to take it out of the path,
+  not to configure it more carefully.
+- A machine that outlives its chassis carries its history with it. Before reading a trend as one
+  machine getting worse, work out how many machines are actually in the data.
+---
+
+## 🔑 Dev Diary — The desktop client was leaking this box's admin password
+
+**Date:** 2026-09-20
+**Cross-reference:** full writeup in [`x1e-win-11.md`](x1e-win-11.md)
+
+Worth recording here because the exposed credential was **this NAS's `admin` account**, even
+though the leak happened on a client machine.
+
+QVR Pro Client on the Windows laptop writes its connection string into its own logfiles in
+the clear:
+
+```
+qvrpros://admin:<secret>@<qnap-lan-ip>:6661
+```
+
+19 files spanning 2026-06-04 to 2026-09-17, plus a `PanguDmp` HTTP capture holding the raw
+POST body to `/cgi-bin/authLogin.cgi` — so the password appeared twice over, as a URI and as
+a form field.
+
+Hashing every occurrence and counting distinct values gave **one hash** across three and a
+half months and many reboots. A static, long-lived password, not a session token. And it was
+`admin` — full administrator on the box that runs Vaultwarden.
+
+NAS-side actions taken, in this order, because purging logs that contain a still-valid
+password achieves nothing:
+
+1. **Rotated the administrator password.**
+2. Created a dedicated **scoped account** for the camera client. Verified against the NAS's
+   own auth response that it reports `isAdmin: 0` — checked the server's answer rather than
+   trusting the account-creation UI.
+3. Only then purged the client's logs (201 MB → 0).
+
+There is no log-level setting that stops QVR writing this, and it rewrites the credential on
+every launch, so the purge has to recur. It now runs as a recurring maintenance task on the
+laptop.
+
+**The lesson that generalises:** a credential in a process argument dies with the process. A
+credential in a logfile persists, gets backed up, and syncs. Any service account that a
+desktop client authenticates with should be scoped to what that client actually needs —
+because you should assume the client will write it down somewhere.
+
+---
+
+# Pass 1 relief, a scoped account, and the outage that ran the experiment for me (2026-09-26)
+
+Two things happened on the same afternoon, so they share an entry.
+
+## What the watcher had already seen
+
+The weekly check had flagged a RECURRENCE on 2026-09-21 — an improper shutdown at 2026-09-20 12:44:45, four
+days after the new PSU — and I never saw it. `display notification` from a LaunchAgent is dropped without
+Notification Center permission, and the 09-16 "CLEAN" verdict had come from a run whose event-log section
+died on the Xcode licence prompt and was counted as zero findings. Recorded as an **unclean shutdown of
+undetermined cause**: no pstore dump was written, which is consistent with a power loss but does not prove
+one. Decision: the PSU work stands, and investigation resumes only if the watcher reports another event.
+
+The watcher now runs daily at 10:00, alerts with a modal dialog instead of a notification (detached, gives up
+after 12 h, `AbandonProcessGroup` so launchd does not reap it), and a section that fails is INCONCLUSIVE with
+exit 2, never CLEAN. Tested through `launchctl kickstart`: dialog shown and closed, logged in `alerts.log`.
+
+## The outage
+
+Around 17:24 JST the neighbourhood lost power briefly (lightning, probably). Pi 3 and Pi 4 on plain mains
+rebooted at 17:25, Astromeda at 17:28. The NAS, behind the EcoFlow Delta 2, rebooted at 17:27:55 with the
+usual three-line cluster. The Mac mini, **on the same EcoFlow**, stayed up (15 days). The EcoFlow carried one
+load through and not the other; whether that is PSU hold-up versus transfer time or something downstream of
+the NAS's outlet, "the NAS is on a battery" is not protection for this NAS. Filed, not acted on.
+
+Collateral: Plex's container on Astromeda did not come back because its CIFS volume could not mount while the
+NAS was still down (exit 255; restart policies do not cover volume-mount failures). Started by hand at 17:45.
+The Bedrock servers and Watchtower came up on their own.
+
+## Pass 1: what changed
+
+Baseline at 17:09, before the outage: load 6.2, CPU 33% usr / 41% sys / 16% idle / 8% io, MemAvailable
+3.8 GB, 1.6 GB in swap with zero swap-in/out over 60 s, md1 40% busy, dm-crypt device 40% busy.
+
+- Antivirus job "Downloads": Monday 00:00 → 01:00, and `/Download/@Recycle` excluded. The last run scanned
+  540 files / 134 GB in 742 minutes; all of it was deleted torrents sitting in the recycle bin (174 GB).
+- Media library: `homes` and `Multimedia` removed as content sources (`mymediadbcmd delfolder`, path without a
+  trailing slash or it silently does nothing). Multimedia Console itself stays: Cayin Media Viewer depends on
+  it, and Cayin is a QVR Pro dependency.
+- SMB access logging was already off in QuLog (`SAMBA = 0`). Qboost's schedule file is empty and the 01:00
+  `flush_memory.sh` in cron is a QTS no-op. Nothing to change on either.
+- Containers `adguardhome`, `caddy`, `vaultwarden` and their images removed; Container Station stays because
+  `qvrpro_all` runs in it. The `vaultwarden` share is archived to `<backup-share>`
+  (`diff -r` identical, 274 files); the share itself is still to be removed. HBS `8TB_backup` never included it.
+- New non-admin user `astromeda`, scoped to the shares the desktop uses, including a new share `Insta360` that
+  points at the existing `homes/<nas-user>/Creatives/Videos/Insta360`; no `homes`. That tree is now
+  owned by `astromeda`. Astromeda's saved credential for <qnap-lan-ip> went from `admin` to it inside my own
+  session (a one-shot interactive scheduled task, because `cmdkey` over SSH cannot reach that Credential
+  Manager). Verified from inside the session: five drives reconnected, Insta360 writable, the read-only
+  shares refuse writes, `homes` denied.
+- The mirror script targets the new share and excludes `@Recently-Snapshot` and `@Recycle`. QTS creates the
+  snapshot directory at every share root, and the first `/L` preview showed `/MIR` trying to delete read-only
+  snapshot links (ERROR 59, retry loop). Under the old path that directory sat at the `homes` root, out of scope.
+- Plex maintenance window 03:00–05:00 (was 02:00–05:00); its task features untouched. Ends before Monday's
+  05:00 HBS run.
+- Time Machine on the Mac: daily since yesterday; sticky exclusions for DerivedData and two `node_modules`.
+  `Docker.raw` was already excluded, which means the supabase volumes on the Mac are not in Time Machine.
+
+Same evening, follow-ups: snapshot retention set to 1 in the UI, and the pool went from 85.1% to 77.7%
+allocated — about 1.06 TB back, measured, not estimated. The `vaultwarden` share and folder removed in the UI;
+the manual HBS job `Vaultwarden_backup` still points at it and can go too. The netcup pulls were never involved:
+they land in `<backup-share>` (daily SQLite dumps and the site backups). QVR Pro Client works
+with the scoped `<camera-user>` login; engawa1 and toilet1 were down after the outage, as they tend to be.
+
+I would rather use `<mirror-user>` than a new account whose password I never typed, so `<mirror-user>` got the
+same scoped grants. The Credential Manager switch itself has to happen in my own session with the password typed in — a helper that prompts for it sits in
+`C:\ProgramData\insta360-mirror\switch-nas-cred.ps1`. The switch was done on 09-27 at 15:08; the mirror ran
+under `<mirror-user>` straight after, and the `astromeda` account is deleted from the NAS and every share list. Smart Fan thresholds still to do in Control Panel > Hardware.
+
+Pending over the next days: the after-sample once the RAID resync from the outage finishes, Monday's antivirus
+duration, Time Machine spacing, temperatures, and whether anything re-adds media content sources.
+
+Next morning (09-27): the daily run at 10:00 alarmed again on the same two events, which is correct by the
+old contract and useless in practice — a daily check would re-alarm every day until the next reboot. Added an
+"acknowledged up to" marker (`qnap-snapshots/.psu-watch-since`, an epoch): events at or before it are printed
+as context, only newer ones alarm. Set to 2026-09-26 23:00 JST, after that boot's resync finished. A manual run
+then reports CLEAN. The 01:30 mirror ran under the scoped account (rc 2, extras only). First Sunday sample at
+11:08 with Time Machine mid-backup: load 3.4–4.0, CPU 25% usr / 27% sys / 27% idle / 21% io, dm-crypt 84% busy
+from the backup, MemAvailable 3.7 GB, ~11 MB/min swapping out under that load, disks 42–44 °C at 2311 rpm.
+
+---
+
+# A share that passed its preview, a mirror that had been dead for a week, and a UPS that did its job (2026-10-11 → 14)
+
+Three days that started with a drone card that would not mount and ended with two nightly mirrors, a UPS
+client on the Mac mini, and a quota I did not know I had enabled. The card itself is in the MacBook log; this
+is the NAS side.
+
+## The mirror that had been dead for eight nights
+
+While mapping how the Insta360 mirror reaches this box, the log on Astromeda showed every run since
+**2026-10-06** ending in `ABORT destination \\<qnap-lan-ip>\Insta360 does not contain the mirror` (exit 17),
+and the three nights before that starting and never finishing. Nothing had told me. The mirror only wrote
+`mirror.log`; the checksum job's weekly all-clear mail covered the checksum job and nothing else.
+
+The share lists were fine: `<mirror-user>` in `write list` and `valid users`, and `smbstatus` showed its session
+connected. From inside my own Windows session (a one-shot `Register-ScheduledTask -LogonType Interactive`,
+the only way to use that session's Credential Manager from SSH) `Test-Path \\<qnap-lan-ip>\Insta360` threw
+*Access is denied* while `\\QNAPBOX66\Insta360` as `<checksum-user>` listed seven items. The difference was on
+disk, not in Samba: the 2026-10-05 Advanced Folder Permissions switch turned the volume's ACLs on, and the
+parents `homes/<nas-user>`, `Creatives`, `Videos` carry `user:<checksum-user>:r-x` (from the `<backup-share>`
+work) and nothing for `<mirror-user>`. The share root itself had `<mirror-user>:rwx`; it just could not be walked to.
+
+Fix, which I ran myself: `setfacl -m u:<mirror-user>:--x` on the three parents. Traverse only, no listing. A
+`-Preview` run straight after: 321 files, 413.65 GB, all identical, nothing to copy. The lesson is not the
+ACL; it is that a backup whose only failure signal is a line in a file on another machine has no failure
+signal at all.
+
+## The drone share, and the quota that came with it
+
+`AtomSE` is the second share of the Insta360 kind: `homes/<nas-user>/Creatives/Videos/AtomSE`, the same
+account grants as Insta360, guest denied, recycle bin off (the toggle was greyed out, but `smb.conf` says `no`).
+The folder was created with the same ownership and inherited ACLs as the Insta360 one before the share
+pointed at it.
+
+The first seed from Astromeda failed on every `mkdir` with robocopy `ERROR 112 — not enough space on the
+disk`, with 2.8 TB free. The `/L` preview had passed, because a preview never asks the server to write.
+`repquota` had the answer: `<mirror-user>` was `+-` over quota, 433 GB used against a 128 GiB hard limit, grace
+expiring in four days. `/etc/config/usr_quota.conf` had `User Enable = TRUE` with a 128 GiB default, and
+its mtime matched the minutes I spent in the shared-folder dialog. I never set a quota on purpose; the
+feature is on now, so **every new user gets 128 GiB unless I say otherwise**. `<mirror-user>` and `<camera-user>` are
+Unlimited. Had I not been seeding that evening, the Insta360 mirror would have started dying again at
+01:30 for a second reason, with the same one-line log entry.
+
+Re-seeded: 83 files, 64.18 GB, 14 minutes at ~164 MB/s. Hashed from the Mac over SMB (never on this CPU):
+81/81 match. The old `Atom SE` folder — 100 GB, of which 46.6 GB were a second copy of the other half —
+went to the recycle bin from the Mac's mount. That bin now holds ~328 GB across `Creatives` and `Work`,
+and the pool gets none of it back until I empty it.
+
+## The brownout that was not one
+
+Three "Detected UPS power loss … / UPS power restored. Canceled …" pairs: 10-12 07:43, 10-13 10:27 and
+14:02, each about nine seconds apart in the log — which is the poll interval, not the event. The APC
+reports `input.transfer.reason: input voltage out of range` at 99–101 V against an 82 V transfer point, so
+sensitivity is not it. The NAS never rebooted, `md1` never resynced, no disk or thermal lines. Astromeda
+on wall power, the Mac mini on the same APC, the Pis: nothing at either time. Not the mains, then, and not
+the new PSU. The APC's input is the Delta 2's AC output, and the Delta 2 holds a 50 % reserve it tops up
+from AC whenever it dips below — each start or stop of that charging is an inverter-to-passthrough relay
+transfer the APC sees as a gap. High-draw appliances are ruled out: nothing was on during the events, and
+the washing machine, vacuum and kettle have all run since with no entry.
+
+Decision: live with it. The APC bridges every one and that is what it is for. QTS is now in
+**auto-protection** mode after five minutes (unmount and wait, rather than power off) with **network UPS
+master** on for the Mac mini and Astromeda. From here on a "power loss / cancelled" pair is noise; an actual
+shutdown or a long on-battery stretch is the signal.
+
+Separate and unresolved: LAN stalls on 10-11 ~21:40 and 10-12 ~23:00 with no UPS event, where this box's
+`igb`, the Mac mini's `tg3` and Astromeda's NIC all logged transmit timeouts at once and the catcam Pi
+rebooted on its Wi-Fi watchdog. That is the switch or the router, and it waits for the next occurrence.
+
+*Update 2026-10-25: those two stalls were part of a longer series. On 24 and 25 October this box's `igb`
+logged `Reset adapter` 19–20 times in exactly the minutes the Mac mini's `tg3` stormed, and it had
+received 139,811 pause frames since its last boot against 228 sent. The strongly suspected source, not
+yet proven, is the desktop's Killer NIC and its 2020 driver rather than the switch or the router. The
+full write-up is in the Mac mini log (2026-10-25, later), and the driver change in the desktop log.*
+
+# What the switch was telling the NAS, and a firewall changed by importing a file (2026-10-26)
+
+### Why the NAS gets paused far more than it pauses
+
+Since its last boot the NAS had received about 151,000 pause frames and sent fewer than 400. With
+spinning disks behind it you'd expect the opposite: a NAS asking the switch to wait. But a pause
+frame is about the network, not the disks. A switch sends XOFF to whichever port is feeding it
+frames it can't pass on. The RAID10 reads far faster than one gigabit link, so on reads the NAS
+always has more to send than the path can carry.
+
+To find where the path stops draining, I ran a temporary iperf3 server on the NAS (a container,
+removed afterwards) and sent from it for 20 seconds twice, with counters read before and after:
+
+| Run | Path | Rate | Pause frames to the NAS | to the Mac mini |
+|---|---|---|---|---|
+| A | NAS → Mac mini, both on the 8-port switch | 909 Mb/s, 0 retransmits | 0 | 0 |
+| B | NAS → laptop, through the switch's uplink, router and two satellites | 841 Mb/s, 2 retransmits | 10,875 | 73 |
+
+The switch is fine at full speed between its own ports. Once traffic leaves through its uplink,
+something at or beyond the router can't keep up, the switch fills, and it pauses the NAS. It also
+pauses the Mac mini, which was only sending its usual ~3 Mb/s livestream. That's the same path
+the storms in the Mac mini log would take. Which hop caps it at ~840 Mb/s is still open; a laptop
+plugged into the other satellite will tell.
+
+A once-a-minute cron job now appends eth0's traffic and flow-control counters to a log on the data
+volume, via `/etc/config/crontab`, QNAP's documented way of adding jobs. A small report script on
+the Mac lines them up against the nightly jobs, to see whether the steady trickle of pauses
+follows the backups.
+
+### Changing QuFirewall without locking anyone out
+
+The active profile blocks the admin UI for the whole LAN except a short allow-list of
+machines. Several of those machines were getting new addresses. Editing the allow-list in place risked locking out the machine doing the editing, so
+I used the profile export instead. The CSV carries the rules as a JSON column. I generated two
+new profiles from it and imported them under new names:
+
+- **`_2`**: old and new addresses side by side. Activated first.
+- **`_3`**: new addresses only. Activated once every machine had moved.
+
+The original export stayed untouched as the way back. After `_3` I checked each machine on the
+allow-list could still reach what it needs, and a machine off the list was still refused.
+
+### The UPS page that showed an empty list
+
+When the desktop moved addresses, its entry in the NAS's network-UPS client list had to go. QTS's UPS
+page showed the list as **empty**. But `/etc/config/ups/upsd.conf` still held two `ACL` entries, the
+Mac mini and the desktop's old address, and the Mac mini was logged in and receiving status. Had I
+applied the empty list as shown, the Mac mini would have lost the low-battery shutdown signal.
+Re-adding only the Mac mini and applying left exactly that one ACL in the file. `upsc -c` against the
+NAS listing the Mac mini as a client confirmed it. The page renders a list it doesn't actually show, so
+read the file before trusting the UI.

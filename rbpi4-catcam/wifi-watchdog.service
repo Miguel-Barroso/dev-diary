@@ -1,0 +1,10 @@
+[Unit]
+Description=WiFi watchdog (recover wedged brcmfmac)
+# Deliberately no network dependencies: this must run exactly when the network is broken.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wifi-watchdog.sh
+# A totally dead firmware can hang `modprobe -r`; kill the run and let the
+# next timer tick keep escalating toward reboot.
+TimeoutStartSec=90
